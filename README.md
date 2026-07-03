@@ -1,8 +1,10 @@
 # CXLporter
 
 This is a compact user-space CXLporter-style harness for the CXLfork
-prototype. It is not a full OpenWhisk deployment. It reproduces the paper's
-CXLporter control-plane roles closely enough to run comparable benchmarks:
+prototype. It also contains an Apache OpenWhisk standalone benchmark path for
+running the same serverless-style workloads through OpenWhisk's Docker action
+runtime. The CXLporter harness reproduces the paper's control-plane roles
+closely enough to run comparable benchmarks:
 
 - Function checkpointing on the checkpoint node.
 - A checkpoint object-store manifest keyed by function/key.
@@ -50,6 +52,27 @@ WARMUP=1 \
 
 The script writes two CSV files under `results/`: an invocation benchmark and a
 checkpoint-store manifest.
+
+## OpenWhisk Standalone
+
+The OpenWhisk path lives under `openwhisk/` and uses the upstream
+`openwhisk/standalone:nightly` image plus the upstream `wsk` CLI. The benchmark
+default is `nodejs:20`, because the standalone image prewarms Node.js action
+containers; `RUNTIME=python:3.10` is also supported when the corresponding
+runtime image is available locally.
+
+```sh
+cd /home/xtl/cxlfork-ws/cxlporter/openwhisk
+./scripts/start-standalone.sh
+RUNTIME=nodejs:20 REQUESTS=5 WARMUP=1 ./scripts/40-benchmark-openwhisk.sh
+REQUESTS=5 WARMUP=1 ./scripts/41-benchmark-local-node.sh
+```
+
+`40-benchmark-openwhisk.sh` measures the full OpenWhisk blocking invoke path
+(`wsk action update`, Docker action runtime, activation metadata). The local
+script runs the same action directly in the OpenWhisk Node.js runtime container,
+without the OpenWhisk control plane, to provide a single-machine runtime
+baseline.
 
 ## Publishing
 

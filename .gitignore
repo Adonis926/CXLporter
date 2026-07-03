@@ -2,4 +2,8 @@ cxlporter
 results/*.csv
 *.o
 *.d
-
+openwhisk/openwhisk-standalone.jar
+openwhisk/openwhisk-standalone.log
+openwhisk/openwhisk-standalone.pid
+openwhisk/wsk
+openwhisk/results/*.csv
