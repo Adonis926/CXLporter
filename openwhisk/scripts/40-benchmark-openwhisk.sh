@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=${ROOT:-/home/xtl/cxlfork-ws/cxlporter/openwhisk}
+ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 WSK=${WSK:-$ROOT/wsk}
 ACTION=${ACTION:-cxlfork_faas_workload}
 RUNTIME=${RUNTIME:-nodejs:20}

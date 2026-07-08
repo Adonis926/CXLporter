@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=${ROOT:-/home/xtl/cxlfork-ws/cxlporter/openwhisk}
+ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 JAR=${JAR:-$ROOT/openwhisk-standalone.jar}
 WSK=${WSK:-$ROOT/wsk}
 APIPORT=${APIPORT:-3233}
 PIDFILE=${PIDFILE:-$ROOT/openwhisk-standalone.pid}
 LOG=${LOG:-$ROOT/openwhisk-standalone.log}
-PROXY=${PROXY:-http://qmyyxtl:Xiong0608@202.120.32.222:9081}
+PROXY=${PROXY:-}
 
 mkdir -p "$ROOT/results"
 

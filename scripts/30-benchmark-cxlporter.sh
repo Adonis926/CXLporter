@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS=${WS:-/home/xtl/cxlfork-ws}
+WS=${WS:-/home/xtl/cxlfork/cxlfork-repro}
 PORTER=${PORTER:-$WS/cxlporter}
 VM0_PORT=${VM0_PORT:-2200}
 VM1_PORT=${VM1_PORT:-2201}
-LOCAL_PORT=${LOCAL_PORT:-2200}
+LOCAL_PORT=${LOCAL_PORT:-2202}
 DIR=${DIR:-/tmp/cxlporter}
 FUNCTIONS=${FUNCTIONS:-"json:4194304 pyaes:4194304 html:8388608 touch:67108864"}
 POLICIES=${POLICIES:-"mow moa hybrid"}
@@ -70,6 +70,19 @@ csv_header() {
 
 manifest_header() {
 	printf 'function,key,bytes,prepare_ns,pages,anon_pages,clean_file_pages,dirty_file_pages,pte_image_build_ns,pt_page_image_build_ns,vma_tree_build_ns,state_image_build_ns,private_rebase_ns,global_detach_ns\n'
+}
+
+validate_csv_columns() {
+	local file=$1
+	local expected=$2
+
+	awk -F, -v expected="$expected" '
+		NF != expected {
+			printf "%s:%d: expected %d columns, got %d\n", FILENAME, FNR, expected, NF > "/dev/stderr"
+			bad = 1
+		}
+		END { exit bad }
+	' "$file"
 }
 
 run_checkpoint() {
@@ -167,6 +180,8 @@ main() {
 		done
 		key=$((key + 1))
 	done
+	validate_csv_columns "$OUT" 24
+	validate_csv_columns "$MANIFEST" 14
 	echo "results=$OUT"
 	echo "manifest=$MANIFEST"
 }

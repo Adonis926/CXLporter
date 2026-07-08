@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=${ROOT:-/home/xtl/cxlfork-ws/cxlporter/openwhisk}
+ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 RUNTIME_IMAGE=${RUNTIME_IMAGE:-openwhisk/action-nodejs-v20:nightly}
 FUNCTIONS=${FUNCTIONS:-"json:4194304 pyaes:4194304 html:8388608 touch:67108864"}
 REQUESTS=${REQUESTS:-5}

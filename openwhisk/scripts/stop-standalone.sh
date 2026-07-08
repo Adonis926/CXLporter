@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=${ROOT:-/home/xtl/cxlfork-ws/cxlporter/openwhisk}
+ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 PIDFILE=${PIDFILE:-$ROOT/openwhisk-standalone.pid}
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   kill "$(cat "$PIDFILE")" || true
