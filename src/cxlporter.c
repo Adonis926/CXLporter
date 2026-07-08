@@ -16,14 +16,21 @@
 
 #include "cxlfork_uapi.h"
 
+/*
+ * CXLporter 是 CXLfork 主线上的 serverless 复现层：
+ * - checkpoint：在 VM0 生成某个函数的内存镜像并写入 CXL slot。
+ * - invoke：在 VM1 创建 ghost worker，resume 后执行函数 workload。
+ * - local：在 localfork VM 上用普通 fork 执行同类 workload，作为 baseline。
+ */
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
 #define PAGE_SIZE_LOCAL 4096UL
-#define FUNCTION_BASE ((void *)0x776000000000ULL)
+#define FUNCTION_BASE ((void *)0x776000000000ULL) /* 函数数据映射的固定 VA，便于远端恢复。 */
 
 enum function_kind {
+	/* 合成函数类型，模拟 serverless benchmark 中不同访问/计算模式。 */
 	FN_TOUCH,
 	FN_JSON,
 	FN_PYAES,
@@ -32,6 +39,7 @@ enum function_kind {
 };
 
 struct ghost_job {
+	/* parent 发送给 ghost worker 的一次 invoke 请求。 */
 	uint64_t key;
 	uint64_t bytes;
 	uint64_t flags;
@@ -40,6 +48,7 @@ struct ghost_job {
 };
 
 struct invoke_result {
+	/* ghost worker 回传的恢复、执行和 fault 统计。 */
 	uint64_t dispatch_to_done_ns;
 	uint64_t child_start_ns;
 	uint64_t restore_ns;
@@ -55,6 +64,7 @@ struct invoke_result {
 };
 
 struct ghost {
+	/* 一个短生命周期 worker 子进程及其 pipe。 */
 	pid_t pid;
 	int to_child;
 	int from_child;
@@ -77,6 +87,7 @@ static size_t round_len(uint64_t len)
 
 static enum function_kind parse_function(const char *name)
 {
+	/* 脚本中的函数名到内部 workload 类型的映射。 */
 	if (!strcmp(name, "touch"))
 		return FN_TOUCH;
 	if (!strcmp(name, "json") || !strcmp(name, "Json"))
@@ -110,6 +121,7 @@ static const char *function_name(enum function_kind fn)
 
 static uint64_t policy_flags(const char *policy)
 {
+	/* CXLporter policy 名称复用 CXLfork 的 MoW/MoA/hybrid flag。 */
 	if (!strcmp(policy, "mow"))
 		return CXLFORK_F_MIGRATE_ON_WRITE;
 	if (!strcmp(policy, "moa"))
@@ -122,6 +134,7 @@ static uint64_t policy_flags(const char *policy)
 
 static uint8_t pattern(size_t i, enum function_kind fn)
 {
+	/* 为不同函数生成稳定输入数据，保证 checkpoint/resume 内容可验证。 */
 	static const char json_chars[] =
 		"{\"key\":12345,\"value\":\"abcdef\",\"items\":[1,2,3,4]},";
 	static const char html_chars[] =
@@ -136,6 +149,7 @@ static uint8_t pattern(size_t i, enum function_kind fn)
 
 static void map_and_fill(size_t len, enum function_kind fn)
 {
+	/* VM0/local baseline 预先把函数输入映射到固定地址并填充。 */
 	uint8_t *p;
 	size_t i;
 
@@ -244,6 +258,7 @@ static uint64_t run_float(size_t len)
 
 static uint64_t run_function(size_t len, enum function_kind fn)
 {
+	/* 当前 workload 是 C 语言合成版本，不等同于 OpenWhisk action 的完整运行时开销。 */
 	switch (fn) {
 	case FN_TOUCH:
 		return run_touch(len);
@@ -304,6 +319,7 @@ static uint64_t avg_u64(const uint64_t *v, int n)
 
 static int checkpoint_cmd(int argc, char **argv)
 {
+	/* VM0 命令：准备函数内存并调用 CXLFORK_FORK_PREPARE。 */
 	struct cxlfork_checkpoint op;
 	struct cxlfork_release rel;
 	enum function_kind fn;
@@ -360,6 +376,7 @@ static int checkpoint_cmd(int argc, char **argv)
 
 static void do_restore_job(const struct ghost_job *job, struct invoke_result *res)
 {
+	/* ghost worker：执行 CXLFORK_FORK_RESUME，再运行函数 workload 并读取 fault 差值。 */
 	struct cxlfork_restore op;
 	struct cxlfork_stats stats;
 	enum function_kind fn = (enum function_kind)job->function;
@@ -410,6 +427,7 @@ static void do_restore_job(const struct ghost_job *job, struct invoke_result *re
 
 static void ghost_loop(int read_fd, int write_fd)
 {
+	/* 单个 ghost 只处理一个 job，完成后退出，模拟冷启动/远端恢复路径。 */
 	struct ghost_job job;
 	struct invoke_result res;
 
@@ -425,6 +443,7 @@ static void ghost_loop(int read_fd, int write_fd)
 
 static int spawn_ghost(struct ghost *g)
 {
+	/* 创建 ghost worker，并建立 parent/child 双向 pipe。 */
 	int to_child[2];
 	int from_child[2];
 	pid_t pid;
@@ -455,6 +474,7 @@ static int spawn_ghost(struct ghost *g)
 
 static int reap_ghost(struct ghost *g, struct invoke_result *res)
 {
+	/* 收集 ghost 结果，并把 dispatch 到完成的端到端时间写入结果。 */
 	int status;
 
 	if (read_full(g->from_child, res, sizeof(*res)))
@@ -473,6 +493,7 @@ static int reap_ghost(struct ghost *g, struct invoke_result *res)
 
 static int dispatch_ghost(struct ghost *g, const struct ghost_job *job)
 {
+	/* 下发一次 invoke；当前实现为了便于调试，外层循环一次只保持一个 outstanding job。 */
 	g->dispatch_ns = nsec_now();
 	g->busy = 1;
 	write_full(g->to_child, job, sizeof(*job));
@@ -481,6 +502,7 @@ static int dispatch_ghost(struct ghost *g, const struct ghost_job *job)
 
 static int invoke_cmd(int argc, char **argv)
 {
+	/* VM1 命令：按 policy 恢复 CXL slot 并执行多轮函数请求。 */
 	struct ghost *pool;
 	struct ghost_job job;
 	struct invoke_result *measured;
@@ -625,6 +647,7 @@ static int invoke_cmd(int argc, char **argv)
 
 static int local_cmd(int argc, char **argv)
 {
+	/* localfork baseline：普通 fork 后直接运行相同合成函数。 */
 	enum function_kind fn;
 	struct invoke_result *measured;
 	uint64_t *fork_ns;
@@ -725,6 +748,7 @@ static int local_cmd(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+	/* 三个子命令由 scripts/30-benchmark-cxlporter.sh 跨 VM 编排。 */
 	if (argc < 2) {
 		fprintf(stderr, "usage: %s checkpoint|invoke|local ...\n", argv[0]);
 		return 2;

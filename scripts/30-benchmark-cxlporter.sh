@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# CXLporter serverless 主线 benchmark：
+# - VM0 checkpoint 每个函数的输入状态。
+# - VM1 通过 ghost worker resume + invoke。
+# - localfork 跑普通 fork baseline，用于横向对比。
 WS=${WS:-/home/xtl/cxlfork/cxlfork-repro}
 PORTER=${PORTER:-$WS/cxlporter}
 VM0_PORT=${VM0_PORT:-2200}
@@ -20,6 +24,7 @@ MANIFEST=${MANIFEST:-$PORTER/results/checkpoint-store-$(date +%Y%m%d-%H%M%S).csv
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 
 vm_ssh() {
+	# 用端口区分 VM0/VM1/localfork。
 	local port=$1
 	shift
 	ssh "${SSH_OPTS[@]}" -p "$port" ubuntu@localhost "$@"
@@ -32,6 +37,7 @@ vm_scp() {
 }
 
 field() {
+	# 从 cxlporter stdout 的 key=value 输出中抽取 CSV 字段。
 	local text=$1
 	local name=$2
 
@@ -49,10 +55,12 @@ field() {
 }
 
 build() {
+	# 编译 cxlporter 用户态 harness。
 	make -C "$PORTER" clean all
 }
 
 deploy() {
+	# 部署同一个 cxlporter 二进制到三个 VM；VM0/VM1 还需要 /dev/cxlfork 权限。
 	local port
 
 	for port in "$VM0_PORT" "$VM1_PORT" "$LOCAL_PORT"; do
@@ -65,10 +73,12 @@ deploy() {
 }
 
 csv_header() {
+	# 主结果 CSV：LocalFork 和 CXLporter 行共享 24 列，缺失字段写 0/NA。
 	printf 'system,function,key,bytes,policy,pool,requests,warmup,keepalive_us,prepare_ns,restore_ns,dispatch_to_done_ns,fork_to_child_ns,workload_ns,child_total_ns,pages,faults,pte_image_build_ns,pt_page_image_build_ns,vma_tree_build_ns,state_image_build_ns,private_rebase_ns,global_detach_ns,notes\n'
 }
 
 manifest_header() {
+	# checkpoint manifest 单独记录 prepare 阶段 metadata breakdown。
 	printf 'function,key,bytes,prepare_ns,pages,anon_pages,clean_file_pages,dirty_file_pages,pte_image_build_ns,pt_page_image_build_ns,vma_tree_build_ns,state_image_build_ns,private_rebase_ns,global_detach_ns\n'
 }
 
@@ -86,6 +96,7 @@ validate_csv_columns() {
 }
 
 run_checkpoint() {
+	# VM0：每个函数只 checkpoint 一次，后续不同 policy/pool 复用同一个 key。
 	local fn=$1
 	local bytes=$2
 	local key=$3
@@ -114,6 +125,7 @@ run_checkpoint() {
 }
 
 run_local() {
+	# localfork baseline：普通 fork + 同一合成函数 workload。
 	local fn=$1
 	local bytes=$2
 	local out fork_to_child_ns workload_ns child_total_ns pages
@@ -131,6 +143,7 @@ run_local() {
 }
 
 run_invoke() {
+	# VM1：按 tiering policy 从 CXL slot resume，再在 ghost worker 中执行 workload。
 	local fn=$1
 	local bytes=$2
 	local key=$3
@@ -159,6 +172,7 @@ run_invoke() {
 }
 
 main() {
+	# 测试矩阵由 FUNCTIONS/POLICIES/POOL_SIZES 控制；调试时先缩小矩阵。
 	local entry fn bytes key policy pool
 
 	mkdir -p "$(dirname "$OUT")"

@@ -1,5 +1,8 @@
 'use strict';
 
+// OpenWhisk baseline action：
+// 这里复用 CXLporter 的合成 workload 形状，但运行在 Node.js action runtime 中。
+// init_ns 包含每次 action 内部构造输入 Buffer 的时间，workload_ns 只统计函数计算。
 const PAGE = 4096;
 
 function nowNs() {
@@ -7,6 +10,7 @@ function nowNs() {
 }
 
 function pattern(i, kind) {
+  // 为不同函数生成稳定输入，便于和 CXLporter 合成函数做趋势对比。
   if (kind === 'json') {
     const s = Buffer.from('{"key":12345,"value":"abcdef","items":[1,2,3,4]},');
     return s[i % s.length];
@@ -19,6 +23,7 @@ function pattern(i, kind) {
 }
 
 function makeBuffer(n, kind) {
+  // 模拟 serverless 函数初始化阶段的内存准备。
   const b = Buffer.allocUnsafe(n);
   for (let i = 0; i < n; i += 1) {
     b[i] = pattern(i, kind);
@@ -27,6 +32,7 @@ function makeBuffer(n, kind) {
 }
 
 function touch(b) {
+  // 每页读一次，主要观察内存访问和初始化成本。
   let acc = 0;
   for (let i = 0; i < b.length; i += PAGE) {
     acc ^= b[i];
@@ -95,6 +101,7 @@ function floatWork(b) {
 }
 
 function main(args) {
+  // OpenWhisk 入口：参数来自 wsk -p function/-p bytes。
   const kind = args.function || 'json';
   const bytes = Number.parseInt(args.bytes || '1048576', 10);
   const initStart = nowNs();
@@ -128,6 +135,7 @@ function main(args) {
 exports.main = main;
 
 if (require.main === module) {
+  // 允许 41-benchmark-local-node.sh 在 Docker 中直接执行该文件。
   const args = {};
   for (let i = 2; i < process.argv.length; i += 1) {
     const [key, value] = process.argv[i].split('=', 2);

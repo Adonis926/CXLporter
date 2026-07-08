@@ -1,9 +1,12 @@
 import time
 
+# OpenWhisk Python runtime 的同构 workload。
+# 当前主测试默认使用 Node.js；该文件用于切换 RUNTIME=python:* 时保持函数形状一致。
 PAGE = 4096
 
 
 def _pattern(i, kind):
+    # 为不同函数生成稳定输入，便于和 CXLporter 合成函数做趋势对比。
     if kind == "json":
         s = b'{"key":12345,"value":"abcdef","items":[1,2,3,4]},'
         return s[i % len(s)]
@@ -14,10 +17,12 @@ def _pattern(i, kind):
 
 
 def _buf(n, kind):
+    # 模拟 action 初始化阶段的输入数据构造。
     return bytearray(_pattern(i, kind) for i in range(n))
 
 
 def _touch(b):
+    # 每页读一次，主要观察内存访问成本。
     acc = 0
     for i in range(0, len(b), PAGE):
         acc ^= b[i]
@@ -77,6 +82,7 @@ def _float(b):
 
 
 def main(args):
+    # OpenWhisk 入口：args 来自 action invoke 的 JSON 参数。
     kind = args.get("function", "json")
     n = int(args.get("bytes", 1048576))
     start = time.monotonic_ns()

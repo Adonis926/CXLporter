@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LocalDockerNode baseline：
+# 直接运行 OpenWhisk Node.js action runtime 容器，不经过 OpenWhisk 控制面。
+# 该结果用于拆分“Docker/runtime 启动成本”和“OpenWhisk 平台调度成本”。
 ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 RUNTIME_IMAGE=${RUNTIME_IMAGE:-openwhisk/action-nodejs-v20:nightly}
 FUNCTIONS=${FUNCTIONS:-"json:4194304 pyaes:4194304 html:8388608 touch:67108864"}
@@ -9,6 +12,7 @@ WARMUP=${WARMUP:-1}
 OUT=${OUT:-$ROOT/results/local-node-$(date +%Y%m%d-%H%M%S).csv}
 
 field_json() {
+  # 从直接执行 action 文件得到的 JSON 中抽取字段。
   local json=$1
   local key=$2
   python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get(sys.argv[1], ""))' "$key" <<<"$json"
@@ -25,6 +29,7 @@ for entry in $FUNCTIONS; do
   fn=${entry%%:*}
   bytes=${entry#*:}
   for i in $(seq 1 "$WARMUP"); do
+    # warmup 不计入平均值，用来提前拉取镜像/热启动 Docker 路径。
     docker run --rm --entrypoint node \
       -v "$ROOT/actions:/actions:ro" \
       "$RUNTIME_IMAGE" /actions/faas_workload.js "function=$fn" "bytes=$bytes" >/dev/null

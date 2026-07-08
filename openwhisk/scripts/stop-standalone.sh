@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# 停止 standalone OpenWhisk，并清理 wsk* 容器，避免影响下一轮 baseline。
 ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 PIDFILE=${PIDFILE:-$ROOT/openwhisk-standalone.pid}
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then

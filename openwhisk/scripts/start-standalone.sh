@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 启动 OpenWhisk standalone baseline 环境。
+# PROXY 默认为空；如需代理应由调用者显式传入，不在脚本里擅自切换。
 ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 JAR=${JAR:-$ROOT/openwhisk-standalone.jar}
 WSK=${WSK:-$ROOT/wsk}
@@ -12,6 +14,7 @@ PROXY=${PROXY:-}
 mkdir -p "$ROOT/results"
 
 if [[ ! -f "$JAR" ]]; then
+  # 优先从已有 Docker image 中取 standalone jar，避免每次网络下载。
   if docker image inspect openwhisk/standalone:nightly >/dev/null 2>&1; then
     cid=$(docker create openwhisk/standalone:nightly)
     docker cp "$cid:/openwhisk-standalone.jar" "$JAR"
@@ -23,6 +26,7 @@ if [[ ! -f "$JAR" ]]; then
 fi
 
 if [[ ! -x "$WSK" ]]; then
+  # wsk CLI 不随仓库提交；首次运行时下载到 openwhisk/ 目录。
   echo "[setup] downloading wsk CLI"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
@@ -33,6 +37,7 @@ if [[ ! -x "$WSK" ]]; then
 fi
 
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  # 已有 standalone 进程则复用，减少重复启动成本。
   echo "[start] OpenWhisk already running pid=$(cat "$PIDFILE")"
 else
   rm -f "$LOG"
@@ -46,6 +51,7 @@ else
 fi
 
 for i in $(seq 1 180); do
+  # 等待 standalone 输出 wsk property set 并开放 API。
   if grep -q "wsk property set" "$LOG" 2>/dev/null && curl -fsS "http://127.0.0.1:$APIPORT/api/v1" >/dev/null 2>&1; then
     break
   fi

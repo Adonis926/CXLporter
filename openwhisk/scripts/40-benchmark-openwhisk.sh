@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# OpenWhisk standalone baseline：
+# - 启动/复用本机 standalone OpenWhisk。
+# - 部署 Node/Python action。
+# - 用 blocking invoke 记录平台端等待/执行时间和 action 内部 init/workload 时间。
 ROOT=${ROOT:-/home/xtl/cxlfork/cxlfork-repro/cxlporter/openwhisk}
 WSK=${WSK:-$ROOT/wsk}
 ACTION=${ACTION:-cxlfork_faas_workload}
@@ -11,6 +15,7 @@ WARMUP=${WARMUP:-1}
 OUT=${OUT:-$ROOT/results/openwhisk-$(date +%Y%m%d-%H%M%S).csv}
 
 field_json() {
+  # 从 action result JSON 中抽取 init_ns/workload_ns。
   local json=$1
   local key=$2
   python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get(sys.argv[1], ""))' "$key" <<<"$json"
@@ -24,6 +29,7 @@ mkdir -p "$(dirname "$OUT")"
 "$ROOT/scripts/start-standalone.sh" >/dev/null
 
 case "$RUNTIME" in
+  # runtime 决定部署哪个 action 文件；默认 nodejs:20。
   nodejs:*) ACTION_FILE="$ROOT/actions/faas_workload.js" ;;
   python:*) ACTION_FILE="$ROOT/actions/faas_workload.py" ;;
   *)
@@ -39,6 +45,7 @@ for entry in $FUNCTIONS; do
   fn=${entry%%:*}
   bytes=${entry#*:}
   for i in $(seq 1 "$WARMUP"); do
+    # warmup 不计入平均值，用来提前拉起 runtime/container。
     "$WSK" -i action invoke "$ACTION" --blocking --result -p function "$fn" -p bytes "$bytes" >/dev/null
   done
 
@@ -54,7 +61,7 @@ for entry in $FUNCTIONS; do
     invoke_ns=$((end - begin))
     init_ns=$(field_json "$out" init_ns)
     workload_ns=$(field_json "$out" workload_ns)
-    # Activation metadata has wait/duration; fetch latest activation for platform-side metrics.
+    # activation metadata 记录 OpenWhisk 平台侧 wait/duration，用于和 action 内部时间拆开看。
     act=$("$WSK" -i activation list --limit 1 | awk 'NR==2 {print $3}')
     meta=$("$WSK" -i activation get "$act" 2>/dev/null || true)
     wait_ms=$(printf '%s\n' "$meta" | awk '/"waitTime"/ {gsub(/[^0-9]/,"",$2); print $2; exit}')
