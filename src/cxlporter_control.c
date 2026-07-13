@@ -783,6 +783,12 @@ static void send_result(int fd, const struct worker *worker,
 		U64(result->stats.path_mask));
 	send_optional_u64(fd, "kernel_total_ns", restored,
 			  U64(result->stats.total_ns));
+	send_stat_u64(fd, "lock_wait_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_LOCK_WAIT,
+		      U64(result->stats.lock_wait_ns));
+	send_stat_u64(fd, "lifecycle_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_LIFECYCLE,
+		      U64(result->stats.lifecycle_ns));
 	send_stat_u64(fd, "validation_ns", &result->stats,
 		      CXLFORK_RESTORE_STAT_VALIDATION,
 		      U64(result->stats.validation_ns));
@@ -801,6 +807,12 @@ static void send_result(int fd, const struct worker *worker,
 	send_stat_u64(fd, "dirty_prefault_ns", &result->stats,
 		      CXLFORK_RESTORE_STAT_DIRTY_PREF,
 		      U64(result->stats.dirty_prefault_ns));
+	send_stat_u64(fd, "global_restore_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_GLOBAL,
+		      U64(result->stats.global_restore_ns));
+	send_stat_u64(fd, "rollback_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_ROLLBACK,
+		      U64(result->stats.rollback_ns));
 	send_optional_u64(fd, "kernel_other_ns", restored,
 			  U64(result->stats.other_ns));
 	send_stat_u64(fd, "faults", &result->stats,
@@ -830,6 +842,14 @@ static void send_result(int fd, const struct worker *worker,
 	send_stat_u64(fd, "leaf_copy_pages", &result->stats,
 		      CXLFORK_RESTORE_STAT_LEAF_MATERIALIZE,
 		      U64(result->stats.leaf_copy_pages));
+	send_stat_u64(fd, "dirty_prefault_pages", &result->stats,
+		      CXLFORK_RESTORE_STAT_DIRTY_PREF,
+		      U64(result->stats.dirty_prefault_pages));
+	send_optional_u64(fd, "validated_ptes",
+			  restored &&
+			  (result->stats.path_mask &
+			   CXLFORK_RESTORE_PATH_FULL_VALIDATION),
+			  U64(result->stats.validated_ptes));
 	dprintf(fd, "\n");
 }
 

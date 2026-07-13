@@ -24,21 +24,26 @@ RESULT_FIELDS = [
     "action_total_ns", "action_connect_ns", "action_first_byte_ns",
     "action_bridge_rtt_ns", "daemon_total_ns", "queue_wait_ns",
     "worker_wakeup_ns", "worker_total_ns", "restore_ioctl_ns", "workload_ns",
-    "kernel_total_ns", "validation_ns", "vma_create_ns", "upper_pt_ns",
+    "kernel_total_ns", "lock_wait_ns", "lifecycle_ns", "validation_ns",
+    "vma_create_ns", "upper_pt_ns",
     "shared_leaf_ns", "fallback_ns", "dirty_prefault_ns", "kernel_other_ns",
+    "global_restore_ns", "rollback_ns",
     "supported_mask", "valid_mask", "path_mask", "key", "generation",
     "restore_id", "pages", "page_checksum", "result_checksum", "faults",
     "fault_dispatch_ns", "leaf_materialize_ns", "data_cow_ns", "cxl_copy_ns",
     "shared_leaf_pages", "fallback_pages", "local_copy_pages", "leaf_copy_pages",
+    "dirty_prefault_pages", "validated_ptes",
 ]
 
 SUMMARY_METRICS = [
     "client_e2e_ns", "ow_wait_ns", "ow_init_ns", "ow_duration_ns",
     "action_total_ns", "action_bridge_rtt_ns", "daemon_total_ns",
     "queue_wait_ns", "worker_wakeup_ns", "worker_total_ns",
-    "restore_ioctl_ns", "workload_ns", "kernel_total_ns", "validation_ns",
+    "restore_ioctl_ns", "workload_ns", "kernel_total_ns", "lock_wait_ns",
+    "lifecycle_ns", "validation_ns",
     "vma_create_ns", "upper_pt_ns", "shared_leaf_ns", "fallback_ns",
-    "dirty_prefault_ns", "kernel_other_ns", "fault_dispatch_ns",
+    "dirty_prefault_ns", "global_restore_ns", "rollback_ns",
+    "kernel_other_ns", "fault_dispatch_ns",
     "leaf_materialize_ns", "data_cow_ns", "cxl_copy_ns",
 ]
 
@@ -137,7 +142,7 @@ def one_sample(args, run_id, index):
     request_id = f"{run_id}-{index}-{uuid.uuid4().hex[:8]}"
     base = {field: "NA" for field in RESULT_FIELDS}
     base.update({
-        "schema_version": "1", "run_id": run_id,
+        "schema_version": "2", "run_id": run_id,
         "request_id": request_id, "timestamp_ns": str(time.time_ns()),
         "path": args.path, "function": args.function, "policy": args.policy,
         "mode": args.mode, "validation": args.validation,
