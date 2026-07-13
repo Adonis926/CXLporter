@@ -14,7 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "cxlfork_uapi.h"
+#include <linux/cxlfork.h>
 
 /*
  * CXLporter 是 CXLfork 主线上的 serverless 复现层：

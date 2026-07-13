@@ -1,4 +1,6 @@
 cxlporter
+cxlporter-control
+.build-uapi/
 results/*.csv
 *.o
 *.d
