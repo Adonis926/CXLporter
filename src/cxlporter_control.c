@@ -730,49 +730,107 @@ static void send_error(int fd, const char *id, int status, const char *stage)
 		id && *id ? id : "unknown", status, stage);
 }
 
+static void send_optional_u64(int fd, const char *name, bool valid,
+			      uint64_t value)
+{
+	if (valid)
+		dprintf(fd, " %s=%" PRIu64, name, value);
+	else
+		dprintf(fd, " %s=NA", name);
+}
+
+static void send_stat_u64(int fd, const char *name,
+			  const struct cxlfork_restore_stats_v2 *stats,
+			  uint64_t validity_bit, uint64_t value)
+{
+	bool valid = (stats->supported_mask & validity_bit) &&
+		(stats->valid_mask & validity_bit);
+
+	send_optional_u64(fd, name, valid, value);
+}
+
 static void send_result(int fd, const struct worker *worker,
 			const struct worker_result *result)
 {
 	uint64_t daemon_total = nsec_now() - worker->enqueue_ns;
 	uint64_t queue_wait = worker->dispatch_ns - worker->enqueue_ns;
+	bool restored = worker->job.mode != MODE_COLD;
+	bool ran_workload = worker->job.mode != MODE_RESTORE_ONLY;
 
 	dprintf(fd,
 		"CXLP/1 RESULT id=%s status=%d verify=%u function=%s key=%" PRIu64
 		" generation=%" PRIu64 " bytes=%" PRIu64
 		" daemon_total_ns=%" PRIu64 " queue_wait_ns=%" PRIu64
-		" worker_wakeup_ns=%" PRIu64 " worker_total_ns=%" PRIu64
-		" restore_ioctl_ns=%" PRIu64 " workload_ns=%" PRIu64
-		" result_checksum=%" PRIu64 " page_checksum=%" PRIu64
-		" restore_id=%" PRIu64 " pages=%" PRIu64
-		" supported_mask=%" PRIu64 " valid_mask=%" PRIu64
-		" path_mask=%" PRIu64 " kernel_total_ns=%" PRIu64
-		" validation_ns=%" PRIu64 " vma_create_ns=%" PRIu64
-		" upper_pt_ns=%" PRIu64 " shared_leaf_ns=%" PRIu64
-		" fallback_ns=%" PRIu64 " dirty_prefault_ns=%" PRIu64
-		" kernel_other_ns=%" PRIu64 " faults=%" PRIu64
-		" fault_dispatch_ns=%" PRIu64 " leaf_materialize_ns=%" PRIu64
-		" data_cow_ns=%" PRIu64 " cxl_copy_ns=%" PRIu64
-		" shared_leaf_pages=%" PRIu64 " fallback_pages=%" PRIu64
-		" local_copy_pages=%" PRIu64 " leaf_copy_pages=%" PRIu64 "\n",
+		" worker_wakeup_ns=%" PRIu64 " worker_total_ns=%" PRIu64,
 		worker->job.id, result->status, result->verify,
 		worker->job.function, worker->job.key, worker->job.generation,
 		worker->job.bytes, daemon_total, queue_wait,
-		result->worker_wakeup_ns, result->worker_total_ns,
-		result->restore_ioctl_ns, result->workload_ns,
-		result->result_checksum, result->page_checksum,
-		result->restore_id, result->total_pages,
+		result->worker_wakeup_ns, result->worker_total_ns);
+	send_optional_u64(fd, "restore_ioctl_ns", restored,
+			  result->restore_ioctl_ns);
+	send_optional_u64(fd, "workload_ns", ran_workload,
+			  result->workload_ns);
+	send_optional_u64(fd, "result_checksum", ran_workload,
+			  result->result_checksum);
+	send_optional_u64(fd, "page_checksum", restored,
+			  result->page_checksum);
+	send_optional_u64(fd, "restore_id", restored, result->restore_id);
+	send_optional_u64(fd, "pages", restored, result->total_pages);
+	dprintf(fd,
+		" supported_mask=%" PRIu64 " valid_mask=%" PRIu64
+		" path_mask=%" PRIu64,
 		U64(result->stats.supported_mask), U64(result->stats.valid_mask),
-		U64(result->stats.path_mask), U64(result->stats.total_ns),
-		U64(result->stats.validation_ns), U64(result->stats.vma_create_ns),
-		U64(result->stats.upper_pt_alloc_ns),
-		U64(result->stats.shared_leaf_attach_ns),
-		U64(result->stats.fallback_reconstruct_ns),
-		U64(result->stats.dirty_prefault_ns), U64(result->stats.other_ns),
-		U64(result->stats.faults), U64(result->stats.fault_dispatch_ns),
-		U64(result->stats.leaf_materialize_ns), U64(result->stats.data_cow_ns),
-		U64(result->stats.cxl_to_local_copy_ns),
-		U64(result->stats.shared_leaf_pages), U64(result->stats.fallback_pages),
-		U64(result->stats.local_copy_pages), U64(result->stats.leaf_copy_pages));
+		U64(result->stats.path_mask));
+	send_optional_u64(fd, "kernel_total_ns", restored,
+			  U64(result->stats.total_ns));
+	send_stat_u64(fd, "validation_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_VALIDATION,
+		      U64(result->stats.validation_ns));
+	send_stat_u64(fd, "vma_create_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_VMA_CREATE,
+		      U64(result->stats.vma_create_ns));
+	send_stat_u64(fd, "upper_pt_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_UPPER_PT,
+		      U64(result->stats.upper_pt_alloc_ns));
+	send_stat_u64(fd, "shared_leaf_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_SHARED_LEAF,
+		      U64(result->stats.shared_leaf_attach_ns));
+	send_stat_u64(fd, "fallback_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_FALLBACK,
+		      U64(result->stats.fallback_reconstruct_ns));
+	send_stat_u64(fd, "dirty_prefault_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_DIRTY_PREF,
+		      U64(result->stats.dirty_prefault_ns));
+	send_optional_u64(fd, "kernel_other_ns", restored,
+			  U64(result->stats.other_ns));
+	send_stat_u64(fd, "faults", &result->stats,
+		      CXLFORK_RESTORE_STAT_FAULT_DISPATCH,
+		      U64(result->stats.faults));
+	send_stat_u64(fd, "fault_dispatch_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_FAULT_DISPATCH,
+		      U64(result->stats.fault_dispatch_ns));
+	send_stat_u64(fd, "leaf_materialize_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_LEAF_MATERIALIZE,
+		      U64(result->stats.leaf_materialize_ns));
+	send_stat_u64(fd, "data_cow_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_DATA_COW,
+		      U64(result->stats.data_cow_ns));
+	send_stat_u64(fd, "cxl_copy_ns", &result->stats,
+		      CXLFORK_RESTORE_STAT_CXL_COPY,
+		      U64(result->stats.cxl_to_local_copy_ns));
+	send_stat_u64(fd, "shared_leaf_pages", &result->stats,
+		      CXLFORK_RESTORE_STAT_SHARED_LEAF,
+		      U64(result->stats.shared_leaf_pages));
+	send_stat_u64(fd, "fallback_pages", &result->stats,
+		      CXLFORK_RESTORE_STAT_FALLBACK,
+		      U64(result->stats.fallback_pages));
+	send_stat_u64(fd, "local_copy_pages", &result->stats,
+		      CXLFORK_RESTORE_STAT_CXL_COPY,
+		      U64(result->stats.local_copy_pages));
+	send_stat_u64(fd, "leaf_copy_pages", &result->stats,
+		      CXLFORK_RESTORE_STAT_LEAF_MATERIALIZE,
+		      U64(result->stats.leaf_copy_pages));
+	dprintf(fd, "\n");
 }
 
 static int dispatch_to_worker(struct worker *worker,
