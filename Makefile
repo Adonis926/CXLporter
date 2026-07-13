@@ -11,12 +11,14 @@ CFLAGS += -I$(UAPI_BUILD_DIR)
 
 BIN := cxlporter cxlporter-control
 
-.PHONY: all clean
+.PHONY: all control clean
 
 all: $(BIN)
 
+control: cxlporter-control
+
 cxlporter: src/cxlporter.c $(UAPI_BUILD_DIR)/linux/cxlfork.h
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-format -o $@ $< $(LDFLAGS)
 
 cxlporter-control: src/cxlporter_control.c $(UAPI_BUILD_DIR)/linux/cxlfork.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)

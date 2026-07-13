@@ -95,6 +95,13 @@ async function main(args) {
     fields.push(`policy=${token(args.policy, 'mow')}`);
     fields.push(`mode=${token(args.mode, 'invoke')}`);
     fields.push(`validation=${token(args.validation, 'fast')}`);
+    if (args.hold_ms !== undefined) {
+      const holdMs = Number.parseInt(args.hold_ms, 10);
+      if (!Number.isInteger(holdMs) || holdMs < 0 || holdMs > 10000) {
+        throw new Error(`invalid hold_ms: ${args.hold_ms}`);
+      }
+      fields.push(`hold_ms=${holdMs}`);
+    }
   }
 
   try {

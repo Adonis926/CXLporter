@@ -33,6 +33,7 @@
 #define MAX_PENDING 1024
 #define MAX_LINE 8192
 #define MAX_NAME 32
+#define U64(value) ((uint64_t)(value))
 
 enum function_kind {
 	FN_TOUCH,
@@ -77,6 +78,7 @@ struct control_request {
 	uint64_t bytes;
 	uint64_t page_checksum;
 	uint64_t workload_checksum;
+	uint64_t hold_ms;
 };
 
 struct worker_job {
@@ -91,6 +93,7 @@ struct worker_job {
 	uint64_t workload_checksum;
 	uint64_t restore_flags;
 	uint64_t dispatch_ns;
+	uint64_t hold_ms;
 };
 
 struct worker_result {
@@ -438,6 +441,8 @@ static void do_worker_job(const struct worker_job *job,
 	result->restore_id = op.restore_id;
 	result->total_pages = op.total_pages;
 	result->stats = op.stats;
+	if (job->hold_ms)
+		usleep((useconds_t)(job->hold_ms * 1000));
 
 	if (job->mode == MODE_INVOKE) {
 		workload_begin = nsec_now();
@@ -580,6 +585,9 @@ static int parse_request(char *line, struct control_request *request)
 			if (parse_u64(value, &request->page_checksum)) return -1;
 		} else if (!strcmp(key, "workload_checksum")) {
 			if (parse_u64(value, &request->workload_checksum)) return -1;
+		} else if (!strcmp(key, "hold_ms")) {
+			if (parse_u64(value, &request->hold_ms) || request->hold_ms > 10000)
+				return -1;
 		} else {
 			return -1;
 		}
@@ -662,7 +670,34 @@ static int make_job(const struct control_request *request,
 	job->page_checksum = entry->page_checksum;
 	job->workload_checksum = entry->workload_checksum;
 	job->restore_flags = flags;
+	job->hold_ms = request->hold_ms;
 	return 0;
+}
+
+static int validate_registration(const struct control_request *request)
+{
+	struct cxlfork_inspect_v2 inspect;
+	int fd;
+	int status = 0;
+
+	fd = open(CXLFORK_DEVICE, O_RDWR);
+	if (fd < 0)
+		return errno;
+	init_v2(&inspect, sizeof(inspect));
+	inspect.key = request->key;
+	if (ioctl(fd, CXLFORK_INSPECT_V2, &inspect)) {
+		status = errno;
+	} else if (inspect.generation != request->generation) {
+		status = ESTALE;
+	} else if (inspect.page_checksum != request->page_checksum ||
+		   inspect.observed_page_checksum != request->page_checksum ||
+		   (inspect.flags & CXLFORK_INSPECT_F_CHECKSUM_MISMATCH)) {
+		status = EILSEQ;
+	} else if (inspect.total_pages != round_len(request->bytes) / PAGE_BYTES) {
+		status = EINVAL;
+	}
+	close(fd);
+	return status;
 }
 
 static int queue_push(struct pending_queue *queue,
@@ -726,18 +761,18 @@ static void send_result(int fd, const struct worker *worker,
 		result->restore_ioctl_ns, result->workload_ns,
 		result->result_checksum, result->page_checksum,
 		result->restore_id, result->total_pages,
-		result->stats.supported_mask, result->stats.valid_mask,
-		result->stats.path_mask, result->stats.total_ns,
-		result->stats.validation_ns, result->stats.vma_create_ns,
-		result->stats.upper_pt_alloc_ns,
-		result->stats.shared_leaf_attach_ns,
-		result->stats.fallback_reconstruct_ns,
-		result->stats.dirty_prefault_ns, result->stats.other_ns,
-		result->stats.faults, result->stats.fault_dispatch_ns,
-		result->stats.leaf_materialize_ns, result->stats.data_cow_ns,
-		result->stats.cxl_to_local_copy_ns,
-		result->stats.shared_leaf_pages, result->stats.fallback_pages,
-		result->stats.local_copy_pages, result->stats.leaf_copy_pages);
+		U64(result->stats.supported_mask), U64(result->stats.valid_mask),
+		U64(result->stats.path_mask), U64(result->stats.total_ns),
+		U64(result->stats.validation_ns), U64(result->stats.vma_create_ns),
+		U64(result->stats.upper_pt_alloc_ns),
+		U64(result->stats.shared_leaf_attach_ns),
+		U64(result->stats.fallback_reconstruct_ns),
+		U64(result->stats.dirty_prefault_ns), U64(result->stats.other_ns),
+		U64(result->stats.faults), U64(result->stats.fault_dispatch_ns),
+		U64(result->stats.leaf_materialize_ns), U64(result->stats.data_cow_ns),
+		U64(result->stats.cxl_to_local_copy_ns),
+		U64(result->stats.shared_leaf_pages), U64(result->stats.fallback_pages),
+		U64(result->stats.local_copy_pages), U64(result->stats.leaf_copy_pages));
 }
 
 static int dispatch_to_worker(struct worker *worker,
@@ -829,7 +864,7 @@ static int serve_cmd(int argc, char **argv)
 	signal(SIGTERM, stop_handler);
 	signal(SIGINT, stop_handler);
 	printf("cxlporter_daemon_ready protocol=CXLP/1 port=%s pool=%d abi=%u caps=%" PRIu64 "\n",
-	       port, pool_size, caps.abi_version, caps.capabilities);
+	       port, pool_size, caps.abi_version, U64(caps.capabilities));
 	fflush(stdout);
 
 	while (!stop_requested) {
@@ -878,7 +913,9 @@ static int serve_cmd(int argc, char **argv)
 						request.id);
 					close(client);
 				} else if (request.op == OP_REGISTER) {
-					status = register_entry(registry, &request);
+					status = validate_registration(&request);
+					if (!status)
+						status = register_entry(registry, &request);
 					if (status)
 						send_error(client, request.id, status, "register");
 					else
@@ -1026,15 +1063,16 @@ static int checkpoint_cmd(int argc, char **argv)
 	       " pte_recheck_ns=%" PRIu64 " metadata_ns=%" PRIu64
 	       " checksum_ns=%" PRIu64 " publish_ns=%" PRIu64
 	       " other_ns=%" PRIu64 " verify=ok\n",
-	       argv[3], key, op.generation, op.slot, len, op.total_pages,
-	       op.page_checksum, checksum, prime, op.stats.supported_mask,
-	       op.stats.valid_mask, op.stats.path_mask, op.stats.total_ns,
-	       op.stats.lock_wait_ns, op.stats.lifecycle_ns,
-	       op.stats.vma_preflight_ns, op.stats.pte_walk_ns,
-	       op.stats.gup_ns, op.stats.page_copy_ns,
-	       op.stats.pte_recheck_ns, op.stats.metadata_build_ns,
-	       op.stats.checksum_seal_ns, op.stats.publish_ns,
-	       op.stats.other_ns);
+	       argv[3], key, U64(op.generation), U64(op.slot), len,
+	       U64(op.total_pages), U64(op.page_checksum), checksum, prime,
+	       U64(op.stats.supported_mask), U64(op.stats.valid_mask),
+	       U64(op.stats.path_mask), U64(op.stats.total_ns),
+	       U64(op.stats.lock_wait_ns), U64(op.stats.lifecycle_ns),
+	       U64(op.stats.vma_preflight_ns), U64(op.stats.pte_walk_ns),
+	       U64(op.stats.gup_ns), U64(op.stats.page_copy_ns),
+	       U64(op.stats.pte_recheck_ns), U64(op.stats.metadata_build_ns),
+	       U64(op.stats.checksum_seal_ns), U64(op.stats.publish_ns),
+	       U64(op.stats.other_ns));
 	return 0;
 }
 
@@ -1059,9 +1097,9 @@ static int caps_cmd(void)
 	       " cxl_size=%" PRIu64 " slot_bytes=%" PRIu64
 	       " max_slots=%u max_regions=%u shared_leaf_alignment=%" PRIu64
 	       " policy_mask=%" PRIu64 " verify=ok\n",
-	       caps.abi_version, caps.capabilities, caps.cxl_size,
-	       caps.slot_bytes, caps.max_slots, caps.max_regions,
-	       caps.shared_leaf_alignment, caps.restore_policy_mask);
+	       caps.abi_version, U64(caps.capabilities), U64(caps.cxl_size),
+	       U64(caps.slot_bytes), caps.max_slots, caps.max_regions,
+	       U64(caps.shared_leaf_alignment), U64(caps.restore_policy_mask));
 	return 0;
 }
 
@@ -1083,7 +1121,36 @@ static int release_cmd(int argc, char **argv)
 	}
 	close(fd);
 	printf("cxlporter_release_v2 key=%" PRIu64 " generation=%" PRIu64 " verify=ok\n",
-	       release.key, release.generation);
+	       U64(release.key), U64(release.generation));
+	return 0;
+}
+
+static int inspect_cmd(int argc, char **argv)
+{
+	struct cxlfork_inspect_v2 inspect;
+	int fd;
+
+	if (argc != 3)
+		return 2;
+	init_v2(&inspect, sizeof(inspect));
+	inspect.key = strtoull(argv[2], NULL, 0);
+	fd = open(CXLFORK_DEVICE, O_RDWR);
+	if (fd < 0 || ioctl(fd, CXLFORK_INSPECT_V2, &inspect)) {
+		perror("CXLFORK_INSPECT_V2");
+		if (fd >= 0) close(fd);
+		return 1;
+	}
+	close(fd);
+	printf("cxlporter_inspect_v2 key=%" PRIu64 " generation=%" PRIu64
+	       " slot=%u state=%u readers=%u pages=%" PRIu64
+	       " page_checksum=%" PRIu64 " observed_checksum=%" PRIu64
+	       " flags=%" PRIu64 " verify=%s\n",
+	       (uint64_t)inspect.key, (uint64_t)inspect.generation,
+	       inspect.slot, inspect.state, inspect.reader_count,
+	       (uint64_t)inspect.total_pages, (uint64_t)inspect.page_checksum,
+	       (uint64_t)inspect.observed_page_checksum, (uint64_t)inspect.flags,
+	       (inspect.page_checksum == inspect.observed_page_checksum &&
+		!(inspect.flags & CXLFORK_INSPECT_F_CHECKSUM_MISMATCH)) ? "ok" : "fail");
 	return 0;
 }
 
@@ -1147,13 +1214,14 @@ static int send_cmd(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "usage: %s caps|checkpoint|serve|send|release ...\n", argv[0]);
+		fprintf(stderr, "usage: %s caps|checkpoint|serve|send|inspect|release ...\n", argv[0]);
 		return 2;
 	}
 	if (!strcmp(argv[1], "caps")) return caps_cmd();
 	if (!strcmp(argv[1], "checkpoint")) return checkpoint_cmd(argc, argv);
 	if (!strcmp(argv[1], "serve")) return serve_cmd(argc, argv);
 	if (!strcmp(argv[1], "send")) return send_cmd(argc, argv);
+	if (!strcmp(argv[1], "inspect")) return inspect_cmd(argc, argv);
 	if (!strcmp(argv[1], "release")) return release_cmd(argc, argv);
 	fprintf(stderr, "unknown command: %s\n", argv[1]);
 	return 2;

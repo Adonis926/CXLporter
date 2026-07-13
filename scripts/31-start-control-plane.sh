@@ -24,13 +24,15 @@ vm_scp() {
   scp -q -P "$port" "${SSH_OPTS[@]}" "$@"
 }
 
-make -C "$PORTER" clean all
+make -C "$PORTER" clean control
+
+# Stop the old daemon before replacing its executable; Linux rejects an
+# in-place overwrite of a binary that is still executing (ETXTBSY).
+vm_ssh "$VM1_PORT" "if [[ -f '$DIR/daemon.pid' ]]; then pid=\$(cat '$DIR/daemon.pid'); kill \$pid 2>/dev/null || true; for _ in \$(seq 1 50); do kill -0 \$pid 2>/dev/null || break; sleep 0.1; done; fi"
 for port in "$VM0_PORT" "$VM1_PORT"; do
   vm_ssh "$port" "mkdir -p '$DIR' && sudo chmod 666 /dev/cxlfork"
   vm_scp "$port" "$PORTER/cxlporter-control" ubuntu@localhost:"$DIR/"
 done
-
-vm_ssh "$VM1_PORT" "if [[ -f '$DIR/daemon.pid' ]]; then kill \$(cat '$DIR/daemon.pid') 2>/dev/null || true; fi"
 vm_ssh "$VM1_PORT" "nohup '$DIR/cxlporter-control' serve '$GUEST_CONTROL_PORT' '$POOL' >'$DIR/daemon.log' 2>&1 </dev/null & echo \$! >'$DIR/daemon.pid'"
 
 for _ in $(seq 1 50); do
