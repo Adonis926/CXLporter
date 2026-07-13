@@ -2,6 +2,8 @@ cxlporter
 cxlporter-control
 .build-uapi/
 results/*.csv
+results/control-*/
+results/cohort-control-*/
 *.o
 *.d
 openwhisk/openwhisk-standalone.jar
@@ -9,3 +11,4 @@ openwhisk/openwhisk-standalone.log
 openwhisk/openwhisk-standalone.pid
 openwhisk/wsk
 openwhisk/results/*.csv
+openwhisk/scripts/__pycache__/

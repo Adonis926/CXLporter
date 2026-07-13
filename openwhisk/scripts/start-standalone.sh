@@ -10,6 +10,10 @@ APIPORT=${APIPORT:-3233}
 PIDFILE=${PIDFILE:-$ROOT/openwhisk-standalone.pid}
 LOG=${LOG:-$ROOT/openwhisk-standalone.log}
 PROXY=${PROXY:-}
+INVOKES_PER_MINUTE=${INVOKES_PER_MINUTE:-100000}
+INVOKES_CONCURRENT=${INVOKES_CONCURRENT:-30}
+# standalone.conf 中 guest namespace 的固定开发凭据；可由环境变量覆盖。
+STANDALONE_AUTH=${STANDALONE_AUTH:-23bc46b1-71f6-4ed5-8c54-816aa4f8c502:123zO3xZCLrMN6v2BKK1dXYFpXlPkccOFqm12CdAsMgRU4VrNZ9lyGVCGuMDGIwP}
 
 mkdir -p "$ROOT/results"
 
@@ -37,13 +41,24 @@ if [[ ! -x "$WSK" ]]; then
 fi
 
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  # 已有 standalone 进程则复用，减少重复启动成本。
-  echo "[start] OpenWhisk already running pid=$(cat "$PIDFILE")"
+  # 只复用使用相同限流参数的进程，避免 benchmark 静默落回 standalone 的 60/min 默认值。
+  pid=$(cat "$PIDFILE")
+  argv=$(tr '\0' ' ' <"/proc/$pid/cmdline")
+  minute_arg="-Dwhisk.config.limits-actions-invokes-perMinute=$INVOKES_PER_MINUTE"
+  concurrent_arg="-Dwhisk.config.limits-actions-invokes-concurrent=$INVOKES_CONCURRENT"
+  if [[ "$argv" != *"$minute_arg"* || "$argv" != *"$concurrent_arg"* ]]; then
+    echo "OpenWhisk pid=$pid uses different throttle settings; run stop-standalone.sh before restart" >&2
+    echo "wanted: $minute_arg $concurrent_arg" >&2
+    exit 1
+  fi
+  echo "[start] OpenWhisk already running pid=$pid invokes_per_minute=$INVOKES_PER_MINUTE invokes_concurrent=$INVOKES_CONCURRENT"
 else
   rm -f "$LOG"
   export http_proxy="$PROXY" https_proxy="$PROXY" HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY"
   export PATH="$ROOT:$PATH"
   nohup java -Dwhisk.standalone.host.name=127.0.0.1 \
+    -Dwhisk.config.limits-actions-invokes-perMinute="$INVOKES_PER_MINUTE" \
+    -Dwhisk.config.limits-actions-invokes-concurrent="$INVOKES_CONCURRENT" \
     -jar "$JAR" --no-browser --no-ui --port "$APIPORT" \
     >"$LOG" 2>&1 &
   echo $! >"$PIDFILE"
@@ -51,8 +66,8 @@ else
 fi
 
 for i in $(seq 1 180); do
-  # 等待 standalone 输出 wsk property set 并开放 API。
-  if grep -q "wsk property set" "$LOG" 2>/dev/null && curl -fsS "http://127.0.0.1:$APIPORT/api/v1" >/dev/null 2>&1; then
+  # 已配置过 wsk 时 standalone 不一定再次输出 property 命令，因此只依赖 API readiness。
+  if curl -fsS "http://127.0.0.1:$APIPORT/api/v1" >/dev/null 2>&1; then
     break
   fi
   if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -68,14 +83,8 @@ for i in $(seq 1 180); do
   fi
 done
 
-auth=$(grep -o -- "--auth '[^']*'" "$LOG" | tail -1 | sed "s/--auth '//;s/'//")
-if [[ -z "$auth" ]]; then
-  echo "could not parse auth from $LOG" >&2
-  tail -80 "$LOG" >&2 || true
-  exit 1
-fi
 "$WSK" property set --apihost "http://127.0.0.1:$APIPORT" >/dev/null
-"$WSK" property set --auth "$auth" >/dev/null
+"$WSK" property set --auth "$STANDALONE_AUTH" >/dev/null
 "$WSK" -i action list >/dev/null
 
-echo "openwhisk_ready apihost=http://127.0.0.1:$APIPORT wsk=$WSK pid=$(cat "$PIDFILE")"
+echo "openwhisk_ready apihost=http://127.0.0.1:$APIPORT wsk=$WSK pid=$(cat "$PIDFILE") invokes_per_minute=$INVOKES_PER_MINUTE invokes_concurrent=$INVOKES_CONCURRENT"
