@@ -163,5 +163,11 @@ for port in "$VM0_PORT" "$VM1_PORT"; do
   fi
 done
 
-sha256sum "$OUTDIR"/* >"$OUTDIR/SHA256SUMS"
+# 使用相对文件名生成可移植的校验清单。这样结果目录复制到备份机后，
+# 仍可在目录内直接运行 `sha256sum -c SHA256SUMS`。
+rm -f "$OUTDIR/SHA256SUMS"
+(
+  cd "$OUTDIR"
+  sha256sum -- * >SHA256SUMS
+)
 echo "CONTROL_BENCHMARK_OK outdir=$OUTDIR samples=$(($(wc -l <"$COMBINED") - 1))"
