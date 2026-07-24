@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <linux/cxlfork.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,10 +24,13 @@
 #include "paper_protocol.h"
 
 #define DEFAULT_RUNTIME "/opt/cxlfork/cxlfork_capsule_k0"
+#define DEFAULT_WORKERS 16U
+#define MAX_WORKERS 128U
 
 static volatile sig_atomic_t stop_requested;
 static int listen_fd = -1;
 static const char *runtime_path = DEFAULT_RUNTIME;
+static unsigned int worker_count = DEFAULT_WORKERS;
 
 static uint64_t nsec_now(void)
 {
@@ -223,7 +227,7 @@ static void process_request(const struct cxlporter_ghost_request *request,
 
 		snprintf(status, sizeof(status),
 			 "ghost=ready pid=%ld model=persistent-pid1-fork-per-activation"
-			 " verify=ok", (long)getpid());
+			 " workers=%u verify=ok", (long)getpid(), worker_count);
 		text_response(response, status);
 		goto out;
 	}
@@ -244,6 +248,40 @@ out:
 	response->agent_total_ns = nsec_now() - response->agent_receive_ns;
 }
 
+static void *serve_worker(void *unused)
+{
+	(void)unused;
+	while (!stop_requested) {
+		struct cxlporter_ghost_request request;
+		struct cxlporter_ghost_response response;
+		int client;
+		ssize_t bytes;
+
+		client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+		if (client < 0) {
+			if (errno == EINTR && !stop_requested)
+				continue;
+			if (!stop_requested)
+				perror("accept");
+			break;
+		}
+		bytes = recv(client, &request, sizeof(request), MSG_WAITALL);
+		if (bytes != (ssize_t)sizeof(request)) {
+			memset(&response, 0, sizeof(response));
+			response.magic = CXLPORTER_GHOST_MAGIC;
+			response.version = CXLPORTER_GHOST_VERSION;
+			response.status = -EPROTO;
+		} else {
+			process_request(&request, &response);
+		}
+		if (send(client, &response, sizeof(response), MSG_NOSIGNAL) !=
+		    (ssize_t)sizeof(response))
+			perror("send ghost response");
+		close(client);
+	}
+	return NULL;
+}
+
 static int serve(const char *socket_path)
 {
 	struct sockaddr_un address = {
@@ -252,6 +290,10 @@ static int serve(const char *socket_path)
 	struct sigaction action = {
 		.sa_handler = stop_handler,
 	};
+	pthread_t workers[MAX_WORKERS];
+	unsigned int started = 0;
+	unsigned int index;
+	int result = 0;
 
 	if (strlen(socket_path) >= sizeof(address.sun_path)) {
 		fprintf(stderr, "ghost socket path is too long: %s\n", socket_path);
@@ -274,45 +316,66 @@ static int serve(const char *socket_path)
 		unlink(socket_path);
 		return 1;
 	}
-	printf("ghost-agent event=ready pid=%ld socket=%s runtime=%s verify=ok\n",
-	       (long)getpid(), socket_path, runtime_path);
-	fflush(stdout);
-	while (!stop_requested) {
-		struct cxlporter_ghost_request request;
-		struct cxlporter_ghost_response response;
-		int client;
-		ssize_t bytes;
+	for (index = 0; index < worker_count; index++) {
+		int error = pthread_create(&workers[index], NULL, serve_worker, NULL);
 
-		client = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-		if (client < 0) {
-			if (errno == EINTR || stop_requested)
-				continue;
-			perror("accept");
+		if (error) {
+			errno = error;
+			perror("pthread_create");
+			result = 1;
+			stop_requested = 1;
+			close(listen_fd);
+			listen_fd = -1;
 			break;
 		}
-		bytes = recv(client, &request, sizeof(request), MSG_WAITALL);
-		if (bytes != (ssize_t)sizeof(request)) {
-			memset(&response, 0, sizeof(response));
-			response.magic = CXLPORTER_GHOST_MAGIC;
-			response.version = CXLPORTER_GHOST_VERSION;
-			response.status = -EPROTO;
-		} else {
-			process_request(&request, &response);
-		}
-		if (send(client, &response, sizeof(response), MSG_NOSIGNAL) !=
-		    (ssize_t)sizeof(response))
-			perror("send ghost response");
-		close(client);
+		started++;
 	}
-	close(listen_fd);
-	listen_fd = -1;
+	printf("ghost-agent event=ready pid=%ld socket=%s runtime=%s"
+	       " workers=%u verify=%s\n",
+	       (long)getpid(), socket_path, runtime_path, started,
+	       started == worker_count ? "ok" : "failed");
+	fflush(stdout);
+	for (index = 0; index < started; index++) {
+		int error = pthread_join(workers[index], NULL);
+
+		if (error && !result) {
+			errno = error;
+			perror("pthread_join");
+			result = 1;
+		}
+	}
+	if (listen_fd >= 0) {
+		close(listen_fd);
+		listen_fd = -1;
+	}
 	unlink(socket_path);
+	return result;
+}
+
+static int parse_workers(const char *text, unsigned int *workers)
+{
+	char *end;
+	unsigned long value;
+
+	if (!text || !*text)
+		return 0;
+	errno = 0;
+	value = strtoul(text, &end, 10);
+	if (errno || *end || value < 1 || value > MAX_WORKERS)
+		return -1;
+	*workers = (unsigned int)value;
 	return 0;
 }
 
 int main(int argc, char **argv)
 {
 	const char *socket_path = CXLPORTER_GHOST_SOCKET;
+	const char *workers = getenv("CXLPORTER_GHOST_WORKERS");
+
+	if (parse_workers(workers, &worker_count)) {
+		fprintf(stderr, "invalid CXLPORTER_GHOST_WORKERS: %s\n", workers);
+		return 2;
+	}
 
 	if (argc == 3 && !strcmp(argv[1], "--runtime")) {
 		runtime_path = argv[2];
@@ -322,8 +385,9 @@ int main(int argc, char **argv)
 		socket_path = argv[4];
 	} else if (argc != 1) {
 		fprintf(stderr,
-			"usage: %s [--runtime PATH [--socket PATH]]\n",
-			argv[0]);
+			"usage: %s [--runtime PATH [--socket PATH]]"
+			" (workers: CXLPORTER_GHOST_WORKERS=1..%u)\n",
+			argv[0], MAX_WORKERS);
 		return 2;
 	}
 	return serve(socket_path);

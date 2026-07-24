@@ -30,7 +30,7 @@ cxlporter-paper: src/cxlporter_paper.c src/paper_protocol.h
 
 cxlfork-ghost-agent: src/cxlfork_ghost_agent.c src/paper_protocol.h \
 		$(UAPI_BUILD_DIR)/linux/cxlfork.h
-	$(CC) $(CFLAGS) -Werror -static -o $@ $< $(LDFLAGS)
+	$(CC) $(CFLAGS) -Werror -static -pthread -o $@ $< $(LDFLAGS)
 
 cxlfork-capsule-runtime: $(CXLFORK_K0_SOURCE) \
 		$(UAPI_BUILD_DIR)/linux/cxlfork.h

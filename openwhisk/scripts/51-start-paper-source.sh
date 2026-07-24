@@ -11,7 +11,7 @@ LOG=${LOG:-$RUN_ROOT/openwhisk-standalone.log}
 CXLPORTER_HOST=${CXLPORTER_HOST:-172.17.0.1}
 CXLPORTER_PORT=${CXLPORTER_PORT:-2501}
 INVOKES_PER_MINUTE=${INVOKES_PER_MINUTE:-100000}
-INVOKES_CONCURRENT=${INVOKES_CONCURRENT:-30}
+INVOKES_CONCURRENT=${INVOKES_CONCURRENT:-128}
 
 [[ -f "$JAR" ]] || {
   echo "missing $JAR; run 50-build-paper-source.sh first" >&2
@@ -29,6 +29,14 @@ if [[ -f "$PIDFILE" ]] && kill -0 "$(sed -n '1p' "$PIDFILE")" 2>/dev/null; then
   env=$(tr '\0' '\n' <"/proc/$pid/environ")
   [[ "$argv" == *"$JAR"* && "$argv" == *"--port $APIPORT"* ]] || {
     echo "pid=$pid does not match the requested Paper standalone" >&2
+    exit 1
+  }
+  [[ "$argv" == *"-Dwhisk.config.limits-actions-invokes-perMinute=$INVOKES_PER_MINUTE"* ]] || {
+    echo "pid=$pid does not use INVOKES_PER_MINUTE=$INVOKES_PER_MINUTE" >&2
+    exit 1
+  }
+  [[ "$argv" == *"-Dwhisk.config.limits-actions-invokes-concurrent=$INVOKES_CONCURRENT"* ]] || {
+    echo "pid=$pid does not use INVOKES_CONCURRENT=$INVOKES_CONCURRENT" >&2
     exit 1
   }
   grep -qx "CXLPORTER_ENABLED=true" <<<"$env"

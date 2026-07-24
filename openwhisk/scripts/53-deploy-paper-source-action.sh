@@ -12,6 +12,9 @@ OWNER=${OWNER:-paper}
 FUNCTION=${FUNCTION:-capsule-k0}
 VERSION=${VERSION:-v1}
 RUNTIME=${RUNTIME:-nodejs:20}
+ACTION_MEMORY=${ACTION_MEMORY:-128}
+ACTION_LOGSIZE=${ACTION_LOGSIZE:-0}
+ACTION_CONCURRENCY=${ACTION_CONCURRENCY:-1}
 START=${START:-1}
 
 [[ -x "$WSK" ]] || {
@@ -27,11 +30,14 @@ if [[ "$START" == 1 ]]; then
 fi
 
 "$WSK" -i --apihost "$APIHOST" --auth "$AUTH" action update "$ACTION" "$ACTION_FILE" \
-  --kind "$RUNTIME" --memory 256 --timeout 300000 \
+  --kind "$RUNTIME" --memory "$ACTION_MEMORY" --timeout 300000 \
+  --logsize "$ACTION_LOGSIZE" --concurrency "$ACTION_CONCURRENCY" \
   --annotation cxlfork true \
   --annotation cxlfork-owner "$OWNER" \
   --annotation cxlfork-function "$FUNCTION" \
   --annotation cxlfork-version "$VERSION" >/dev/null
 
 "$WSK" -i --apihost "$APIHOST" --auth "$AUTH" action get "$ACTION" --summary
-echo "paper_source_action_ready action=$ACTION identity=$OWNER/$FUNCTION/$VERSION api=$APIHOST"
+echo "paper_source_action_ready action=$ACTION identity=$OWNER/$FUNCTION/$VERSION" \
+  "memory_mb=$ACTION_MEMORY logsize_mb=$ACTION_LOGSIZE" \
+  "concurrency=$ACTION_CONCURRENCY api=$APIHOST"

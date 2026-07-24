@@ -25,7 +25,7 @@ if [[ "$CLEAN_CONTAINERS" == 1 ]]; then
     exit 1
   fi
   docker ps -a --format '{{.Names}}' |
-    grep -E '^wsk0_' |
+    { grep -E '^wsk0_' || true; } |
     xargs -r docker rm -f >/dev/null
 fi
 

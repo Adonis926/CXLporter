@@ -19,16 +19,23 @@ AUTH=${AUTH:-23bc46b1-71f6-4ed5-8c54-816aa4f8c502:123zO3xZCLrMN6v2BKK1dXYFpXlPkc
 ACTION=${ACTION:-paper_cxlfork_source}
 CONTROL_HOST=${CONTROL_HOST:-172.17.0.1}
 CONTROL_PORT=${CONTROL_PORT:-2501}
+INVOKES_CONCURRENT=${INVOKES_CONCURRENT:-128}
+ACTION_MEMORY=${ACTION_MEMORY:-128}
+ACTION_LOGSIZE=${ACTION_LOGSIZE:-0}
+ACTION_CONCURRENCY=${ACTION_CONCURRENCY:-1}
 
 mkdir -p "$OUTDIR"
 exec > >(tee "$OUTDIR/benchmark.log") 2>&1
 
 echo "event=begin run_id=$RUN_ID outdir=$OUTDIR"
-"$ROOT/scripts/51-start-paper-source.sh"
+INVOKES_CONCURRENT="$INVOKES_CONCURRENT" \
+  "$ROOT/scripts/51-start-paper-source.sh"
 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   -p 2400 ubuntu@127.0.0.1 \
   "sudo /tmp/cxlfork_capsule_k0 catalog-lookup '$KEY'"
 START=0 ACTION="$ACTION" OWNER=paper FUNCTION=capsule-k0 VERSION=v1 \
+  ACTION_MEMORY="$ACTION_MEMORY" ACTION_LOGSIZE="$ACTION_LOGSIZE" \
+  ACTION_CONCURRENCY="$ACTION_CONCURRENCY" \
   "$ROOT/scripts/53-deploy-paper-source-action.sh"
 
 {
@@ -45,6 +52,10 @@ START=0 ACTION="$ACTION" OWNER=paper FUNCTION=capsule-k0 VERSION=v1 \
   echo "burst_samples=$BURST_SAMPLES"
   echo "burst_rps=$BURST_RPS"
   echo "burst_concurrency=$BURST_CONCURRENCY"
+  echo "openwhisk_invokes_concurrent=$INVOKES_CONCURRENT"
+  echo "action_memory_mb=$ACTION_MEMORY"
+  echo "action_logsize_mb=$ACTION_LOGSIZE"
+  echo "action_concurrency=$ACTION_CONCURRENCY"
   echo "host_kernel=$(uname -r)"
 } >"$OUTDIR/environment.txt"
 cp "$ROOT/paper-source/build-metadata.txt" "$OUTDIR/openwhisk-build-metadata.txt"

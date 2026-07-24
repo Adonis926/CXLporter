@@ -19,6 +19,15 @@ OpenWhisk/controller/invoker 激活路径后又要多久；150 RPS burst 下尾�
 1,000 时才输出 P99；否则 P99 为 `NA`。同时输出 mean、P50、P95 和
 标准差。
 
+Paper action 显式使用 `logsize=0`，因为 CXLP/2 已在响应中返回 capsule
+输出和 proof，OpenWhisk 宿主上不存在与逻辑 CXLfork container ID 对应的
+Docker stdout；若保留普通 Docker log collector，它会把成功的逻辑容器
+误判为失效。action 默认按 OpenWhisk 最小实验额度记账为 128 MiB，ghost
+内部使用 16 个固定 worker 并发受理 restore；这不是 16 份 checkpoint，
+它们共同查询同一个 catalog capsule，并为每次 activation 创建独立进程。
+OpenWhisk 入口并发上限设为 128，高于负载发生器的 64 个并发连接，以免
+150 RPS 实验被控制器的默认 30 请求限流人为截断。
+
 ## 计时边界
 
 原始字段是嵌套区间，不能相加。例如 `daemon_total_ns` 包含
