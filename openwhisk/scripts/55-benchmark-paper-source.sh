@@ -148,6 +148,8 @@ fi
 
 (
   cd "$OUTDIR"
-  sha256sum -- * >SHA256SUMS
+  find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' |
+    sort -z |
+    xargs -0 -r sha256sum -- >SHA256SUMS
 )
 echo "event=complete verify=ok outdir=$OUTDIR"
