@@ -1,0 +1,434 @@
+From 8fde5944a352421876be8465146225edec64adb5 Mon Sep 17 00:00:00 2001
+From: xtl <qmyyxtl@sjtu.eud.cn>
+Date: Fri, 24 Jul 2026 06:35:45 +0000
+Subject: [PATCH] invoker: add source-integrated CXLP/2 container path
+
+---
+ .../core/containerpool/ContainerPool.scala    |  52 ++---
+ .../cxlfork/CxlporterContainer.scala          | 190 ++++++++++++++++++
+ .../StandaloneDockerContainerFactory.scala    |  40 +++-
+ .../src/main/resources/standalone.conf        |  15 ++
+ .../cxlfork/CxlporterContainerTests.scala     |  65 ++++++
+ 5 files changed, 337 insertions(+), 25 deletions(-)
+ create mode 100644 core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainer.scala
+ create mode 100644 tests/src/test/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainerTests.scala
+
+diff --git a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerPool.scala b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerPool.scala
+index 3c2ebd9c..effe10aa 100644
+--- a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerPool.scala
++++ b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerPool.scala
+@@ -407,30 +407,34 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
+    * @return the container iff found
+    */
+   def takePrewarmContainer(action: ExecutableWhiskAction): Option[(ActorRef, ContainerData)] = {
+-    val kind = action.exec.kind
+-    val memory = action.limits.memory.megabytes.MB
+-    val now = Deadline.now
+-    prewarmedPool.toSeq
+-      .sortBy(_._2.expires.getOrElse(now))
+-      .find {
+-        case (_, PreWarmedData(_, `kind`, `memory`, _, _)) => true
+-        case _                                             => false
+-      }
+-      .map {
+-        case (ref, data) =>
+-          // Move the container to the usual pool
+-          freePool = freePool + (ref -> data)
+-          prewarmedPool = prewarmedPool - ref
+-          // Create a new prewarm container
+-          // NOTE: prewarming ignores the action code in exec, but this is dangerous as the field is accessible to the
+-          // factory
+-
+-          //get the appropriate ttl from prewarm configs
+-          val ttl =
+-            prewarmConfig.find(pc => pc.memoryLimit == memory && pc.exec.kind == kind).flatMap(_.reactive.map(_.ttl))
+-          prewarmContainer(action.exec, memory, ttl)
+-          (ref, data)
+-      }
++    if (action.annotations.isTruthy("cxlfork")) {
++      None
++    } else {
++      val kind = action.exec.kind
++      val memory = action.limits.memory.megabytes.MB
++      val now = Deadline.now
++      prewarmedPool.toSeq
++        .sortBy(_._2.expires.getOrElse(now))
++        .find {
++          case (_, PreWarmedData(_, `kind`, `memory`, _, _)) => true
++          case _                                             => false
++        }
++        .map {
++          case (ref, data) =>
++            // Move the container to the usual pool
++            freePool = freePool + (ref -> data)
++            prewarmedPool = prewarmedPool - ref
++            // Create a new prewarm container
++            // NOTE: prewarming ignores the action code in exec, but this is dangerous as the field is accessible to the
++            // factory
++
++            //get the appropriate ttl from prewarm configs
++            val ttl =
++              prewarmConfig.find(pc => pc.memoryLimit == memory && pc.exec.kind == kind).flatMap(_.reactive.map(_.ttl))
++            prewarmContainer(action.exec, memory, ttl)
++            (ref, data)
++        }
++    }
+   }
+ 
+   /** Removes a container and updates state accordingly. */
+diff --git a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainer.scala b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainer.scala
+new file mode 100644
+index 00000000..d0ac5855
+--- /dev/null
++++ b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainer.scala
+@@ -0,0 +1,190 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0.
++ */
++
++package org.apache.openwhisk.core.containerpool.cxlfork
++
++import java.io.{BufferedReader, InputStreamReader, OutputStreamWriter}
++import java.net.{InetSocketAddress, Socket}
++import java.nio.charset.StandardCharsets
++import java.time.Instant
++import java.util.concurrent.atomic.AtomicLong
++
++import akka.actor.ActorSystem
++import akka.stream.scaladsl.Source
++import akka.util.ByteString
++import org.apache.openwhisk.common.{Logging, TransactionId}
++import org.apache.openwhisk.core.containerpool.{Container, ContainerAddress, ContainerId, Interval}
++import org.apache.openwhisk.core.entity._
++import spray.json._
++
++import scala.concurrent.duration._
++import scala.concurrent.{blocking, ExecutionContext, Future}
++import scala.util.Try
++
++case class CxlporterContainerConfig(enabled: Boolean,
++                                    host: String,
++                                    port: Int,
++                                    connectTimeout: FiniteDuration,
++                                    requestTimeout: FiniteDuration)
++
++/**
++ * An OpenWhisk Container implementation backed by the paper CXLP/2 endpoint.
++ *
++ * It deliberately represents one logical, persistent ghost rather than a
++ * Docker runtime container created by OpenWhisk. The target-side Docker ghost
++ * owns /dev/cxlfork and forks a capsule runtime for each ACTIVATE request.
++ */
++class CxlporterContainer(override protected val id: ContainerId,
++                         endpointHost: String,
++                         endpointPort: Int,
++                         connectTimeout: FiniteDuration,
++                         requestTimeout: FiniteDuration,
++                         owner: String,
++                         function: String,
++                         capsuleVersion: String)(implicit override protected val as: ActorSystem,
++                                                 override protected val logging: Logging,
++                                                 override protected val ec: ExecutionContext)
++    extends Container {
++
++  override protected[core] val addr = ContainerAddress("cxlfork-ghost.invalid", 1)
++
++  private val tokenPattern = "^[A-Za-z0-9_.:-]+$".r
++
++  private def requireToken(name: String, value: String): String = {
++    require(tokenPattern.pattern.matcher(value).matches(), s"invalid $name token")
++    value
++  }
++
++  require(endpointPort > 0 && endpointPort <= 65535, "invalid CXLP/2 port")
++  requireToken("owner", owner)
++  requireToken("function", function)
++  requireToken("version", capsuleVersion)
++
++  override def initialize(initializer: JsObject,
++                          timeout: FiniteDuration,
++                          maxConcurrent: Int,
++                          entity: Option[WhiskAction] = None)(implicit transid: TransactionId): Future[Interval] = {
++    val now = Instant.now()
++    Future.successful(Interval(now, now))
++  }
++
++  override def suspend()(implicit transid: TransactionId): Future[Unit] =
++    Future.successful(())
++
++  override def resume()(implicit transid: TransactionId): Future[Unit] =
++    Future.successful(())
++
++  override def destroy()(implicit transid: TransactionId): Future[Unit] =
++    Future.successful(())
++
++  override def logs(limit: ByteSize, waitForSentinel: Boolean)(
++    implicit transid: TransactionId): Source[ByteString, Any] =
++    Source.empty
++
++  override def run(
++    parameters: JsValue,
++    environment: JsObject,
++    timeout: FiniteDuration,
++    maxConcurrent: Int,
++    maxResponse: ByteSize,
++    truncation: ByteSize,
++    reschedule: Boolean = false)(implicit transid: TransactionId): Future[(Interval, ActivationResponse)] = Future {
++    blocking {
++      val wallStart = Instant.now()
++      val monotonicStart = System.nanoTime()
++      val activationId =
++        environment.fields.get("activation_id").collect { case JsString(value) => value }.getOrElse("")
++      val requestId = CxlporterContainer.requestId(activationId)
++      val socket = new Socket()
++
++      try {
++        socket.connect(
++          new InetSocketAddress(endpointHost, endpointPort),
++          math.min(connectTimeout.toMillis, Int.MaxValue).toInt)
++        socket.setSoTimeout(math.min(requestTimeout.toMillis, Int.MaxValue).toInt)
++        val writer = new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8)
++        writer.write(s"CXLP/2 ACTIVATE $requestId $owner $function $capsuleVersion\n")
++        writer.flush()
++        val line =
++          new BufferedReader(new InputStreamReader(socket.getInputStream, StandardCharsets.UTF_8)).readLine()
++        val wallEnd = Instant.now()
++        val adapterTotal = System.nanoTime() - monotonicStart
++        val parsed = CxlporterContainer.parseResponse(line)
++        val fields = parsed._2.map { case (key, value) => key -> JsString(value) } ++ Map(
++          "openwhisk_source_integrated" -> JsBoolean(true),
++          "openwhisk_activation_id" -> JsString(activationId),
++          "openwhisk_cxlp_request_id" -> JsString(requestId),
++          "openwhisk_adapter_total_ns" -> JsString(adapterTotal.toString),
++          "cxlfork_owner" -> JsString(owner),
++          "cxlfork_function" -> JsString(function),
++          "cxlfork_version" -> JsString(capsuleVersion))
++        val withProof = parsed._2.get("output_hex").flatMap(CxlporterContainer.decodeHex) match {
++          case Some(proof) => fields + ("runtime_proof" -> JsString(proof))
++          case None        => fields
++        }
++        val response =
++          if (parsed._1) ActivationResponse.success(Some(JsObject(withProof)))
++          else ActivationResponse.applicationError(JsObject(withProof))
++        (Interval(wallStart, wallEnd), response)
++      } catch {
++        case error: Throwable =>
++          val wallEnd = Instant.now()
++          val payload = JsObject(
++            "error" -> JsString(s"CXLP/2 activation failed: ${error.getMessage}"),
++            "openwhisk_source_integrated" -> JsBoolean(true),
++            "openwhisk_activation_id" -> JsString(activationId),
++            "openwhisk_cxlp_request_id" -> JsString(requestId),
++            "openwhisk_adapter_total_ns" -> JsString((System.nanoTime() - monotonicStart).toString))
++          (Interval(wallStart, wallEnd), ActivationResponse.whiskError(payload))
++      } finally {
++        Try(socket.close())
++      }
++    }
++  }
++}
++
++object CxlporterContainer {
++  private val sequence = new AtomicLong(System.nanoTime())
++
++  private[cxlfork] def requestId(activationId: String): String = {
++    val hexadecimal = activationId.filter(_ != '-')
++    if (hexadecimal.length >= 16 && hexadecimal
++          .takeRight(16)
++          .forall(character => Character.digit(character, 16) >= 0)) {
++      Try(java.lang.Long.parseUnsignedLong(hexadecimal.takeRight(16), 16))
++        .map(java.lang.Long.toUnsignedString)
++        .getOrElse(java.lang.Long.toUnsignedString(sequence.incrementAndGet()))
++    } else {
++      java.lang.Long.toUnsignedString(sequence.incrementAndGet())
++    }
++  }
++
++  private[cxlfork] def parseResponse(line: String): (Boolean, Map[String, String]) = {
++    if (line == null || line.length > 32768)
++      throw new IllegalArgumentException("missing or oversized CXLP/2 response")
++    val words = line.trim.split(" +").toVector
++    if (words.length < 2 || words.head != "CXLP/2" || (words(1) != "OK" && words(1) != "ERROR"))
++      throw new IllegalArgumentException("invalid CXLP/2 response")
++    val fields = words
++      .drop(2)
++      .map { word =>
++        val separator = word.indexOf('=')
++        if (separator <= 0)
++          throw new IllegalArgumentException("invalid CXLP/2 response field")
++        word.substring(0, separator) -> word.substring(separator + 1)
++      }
++      .toMap
++    (words(1) == "OK" && fields.get("status").contains("0") && fields.get("verify").contains("1"), fields)
++  }
++
++  private[cxlfork] def decodeHex(value: String): Option[String] = {
++    if ((value.length & 1) != 0 || !value.forall(character => Character.digit(character, 16) >= 0))
++      return None
++    val bytes = value.grouped(2).map(pair => Integer.parseInt(pair, 16).toByte).toArray
++    Some(new String(bytes, StandardCharsets.UTF_8))
++  }
++}
+diff --git a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/docker/StandaloneDockerContainerFactory.scala b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/docker/StandaloneDockerContainerFactory.scala
+index 0251da7f..341bc7bd 100644
+--- a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/docker/StandaloneDockerContainerFactory.scala
++++ b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/docker/StandaloneDockerContainerFactory.scala
+@@ -22,9 +22,11 @@ import org.apache.commons.lang3.SystemUtils
+ import org.apache.openwhisk.common.{Logging, TransactionId}
+ import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
+ import org.apache.openwhisk.core.containerpool.{Container, ContainerFactory, ContainerFactoryProvider}
+-import org.apache.openwhisk.core.entity.{ByteSize, ExecManifest, InvokerInstanceId}
++import org.apache.openwhisk.core.containerpool.cxlfork.{CxlporterContainer, CxlporterContainerConfig}
++import org.apache.openwhisk.core.entity.{ByteSize, ExecManifest, ExecutableWhiskAction, InvokerInstanceId}
+ import pureconfig._
+ import pureconfig.generic.auto._
++import spray.json.DefaultJsonProtocol._
+ 
+ import scala.collection.concurrent.TrieMap
+ import scala.concurrent.{ExecutionContext, Future}
+@@ -60,6 +62,42 @@ class StandaloneDockerContainerFactory(instance: InvokerInstanceId, parameters:
+     extends DockerContainerFactory(instance, parameters) {
+   private val pulledImages = new TrieMap[String, Boolean]()
+   private val factoryConfig = loadConfigOrThrow[StandaloneDockerConfig](ConfigKeys.standaloneDockerContainerFactory)
++  private val cxlporterConfig = loadConfigOrThrow[CxlporterContainerConfig]("whisk.cxlporter")
++
++  override def createContainer(
++    tid: TransactionId,
++    name: String,
++    actionImage: ExecManifest.ImageName,
++    userProvidedImage: Boolean,
++    memory: ByteSize,
++    cpuShares: Int,
++    cpuLimit: Option[Double],
++    action: Option[ExecutableWhiskAction])(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
++    action match {
++      case Some(executable) if cxlporterConfig.enabled && executable.annotations.isTruthy("cxlfork") =>
++        val owner = executable.annotations.getAs[String]("cxlfork-owner").toOption.getOrElse("paper")
++        val function =
++          executable.annotations.getAs[String]("cxlfork-function").toOption.getOrElse(executable.name.asString)
++        val capsuleVersion =
++          executable.annotations.getAs[String]("cxlfork-version").toOption.getOrElse("v1")
++        logging.info(
++          this,
++          s"creating source-integrated CXLP/2 container action=${executable.name} " +
++            s"identity=$owner/$function/$capsuleVersion endpoint=${cxlporterConfig.host}:${cxlporterConfig.port}")
++        Future.successful(
++          new CxlporterContainer(
++            org.apache.openwhisk.core.containerpool.ContainerId(name),
++            cxlporterConfig.host,
++            cxlporterConfig.port,
++            cxlporterConfig.connectTimeout,
++            cxlporterConfig.requestTimeout,
++            owner,
++            function,
++            capsuleVersion))
++      case _ =>
++        createContainer(tid, name, actionImage, userProvidedImage, memory, cpuShares, cpuLimit)
++    }
++  }
+ 
+   override def createContainer(
+     tid: TransactionId,
+diff --git a/core/standalone/src/main/resources/standalone.conf b/core/standalone/src/main/resources/standalone.conf
+index b6acaac8..03363003 100644
+--- a/core/standalone/src/main/resources/standalone.conf
++++ b/core/standalone/src/main/resources/standalone.conf
+@@ -86,6 +86,21 @@ whisk {
+       use-runc = false
+     }
+   }
++
++  # Source-integrated paper path. It is disabled by default so the pinned
++  # standalone build remains a normal OpenWhisk deployment unless the
++  # experiment explicitly enables CXLP/2.
++  cxlporter {
++    enabled = false
++    enabled = ${?CXLPORTER_ENABLED}
++    host = "172.17.0.1"
++    host = ${?CXLPORTER_HOST}
++    port = 2501
++    port = ${?CXLPORTER_PORT}
++    connect-timeout = 2 s
++    request-timeout = 300 s
++  }
++
+   swagger-ui {
+     file-system = false
+     dir-path = "BOOT-INF/classes/swagger-ui"
+diff --git a/tests/src/test/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainerTests.scala b/tests/src/test/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainerTests.scala
+new file mode 100644
+index 00000000..b78a552b
+--- /dev/null
++++ b/tests/src/test/scala/org/apache/openwhisk/core/containerpool/cxlfork/CxlporterContainerTests.scala
+@@ -0,0 +1,65 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to you under the Apache License, Version 2.0.
++ */
++
++package org.apache.openwhisk.core.containerpool.cxlfork
++
++import org.junit.runner.RunWith
++import org.scalatest.{FlatSpec, Matchers}
++import org.scalatest.junit.JUnitRunner
++
++@RunWith(classOf[JUnitRunner])
++class CxlporterContainerTests extends FlatSpec with Matchers {
++
++  behavior of "CxlporterContainer CXLP/2 adapter"
++
++  it should "derive a stable unsigned request id from an OpenWhisk activation id" in {
++    CxlporterContainer.requestId("0000000000000000000000000000002a") shouldBe "42"
++    CxlporterContainer.requestId("0000000000000000ffffffffffffffff") shouldBe "18446744073709551615"
++  }
++
++  it should "accept only a verified successful CXLP/2 response" in {
++    val (verified, fields) =
++      CxlporterContainer.parseResponse("CXLP/2 OK status=0 verify=1 output_hex=6f6b")
++
++    verified shouldBe true
++    fields("status") shouldBe "0"
++    fields("verify") shouldBe "1"
++    CxlporterContainer.decodeHex(fields("output_hex")) shouldBe Some("ok")
++  }
++
++  it should "preserve a well-formed remote error without treating it as success" in {
++    val (verified, fields) =
++      CxlporterContainer.parseResponse("CXLP/2 ERROR status=-2 verify=0 error_stage=catalog_lookup")
++
++    verified shouldBe false
++    fields("status") shouldBe "-2"
++    fields("error_stage") shouldBe "catalog_lookup"
++  }
++
++  it should "not treat an incomplete OK response as verified" in {
++    val (verified, _) = CxlporterContainer.parseResponse("CXLP/2 OK status=0")
++    verified shouldBe false
++  }
++
++  it should "reject the legacy protocol and malformed fields" in {
++    an[IllegalArgumentException] should be thrownBy
++      CxlporterContainer.parseResponse("CXLP/1 RESULT status=0 verify=1")
++    an[IllegalArgumentException] should be thrownBy
++      CxlporterContainer.parseResponse("CXLP/2 OK status=0 malformed")
++  }
++
++  it should "reject missing and oversized responses" in {
++    an[IllegalArgumentException] should be thrownBy CxlporterContainer.parseResponse(null)
++    an[IllegalArgumentException] should be thrownBy
++      CxlporterContainer.parseResponse("X" * 32769)
++  }
++
++  it should "reject malformed hexadecimal runtime proof" in {
++    CxlporterContainer.decodeHex("0") shouldBe None
++    CxlporterContainer.decodeHex("zz") shouldBe None
++  }
++}
+-- 
+2.43.0
+
