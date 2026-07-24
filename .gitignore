@@ -1,5 +1,8 @@
 cxlporter
 cxlporter-control
+cxlporter-paper
+cxlfork-ghost-agent
+cxlfork-capsule-runtime
 .build-uapi/
 results/*.csv
 results/control-*/
