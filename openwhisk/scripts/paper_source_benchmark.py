@@ -86,6 +86,14 @@ NUMERIC_RESPONSE_FIELDS = [
 ]
 
 
+class OpenWhiskHttpError(RuntimeError):
+    def __init__(self, status, payload, decoded):
+        super().__init__(f"OpenWhisk HTTP {status}: {payload[:200]!r}")
+        self.status = status
+        self.payload = payload
+        self.decoded = decoded
+
+
 def text_value(value):
     if value is None:
         return "NA"
@@ -166,9 +174,7 @@ def openwhisk_call(args):
         connection.close()
     decoded = json.loads(payload)
     if response.status != 200:
-        raise RuntimeError(
-            f"OpenWhisk HTTP {response.status}: {payload[:200]!r}"
-        )
+        raise OpenWhiskHttpError(response.status, payload, decoded)
     if "error" in decoded and isinstance(decoded["error"], dict):
         result = decoded["error"]
     else:
@@ -332,6 +338,13 @@ def one_sample(args, index, scheduled_ns):
                 row["status"] = "measurement_error"
                 row["verify"] = "0"
                 row["error_stage"] = "exclusive-breakdown"
+    except OpenWhiskHttpError as error:
+        row["client_total_ns"] = str(time.perf_counter_ns() - start_ns)
+        row["http_status"] = str(error.status)
+        row["error_stage"] = "openwhisk-http"
+        raw["http_status"] = error.status
+        raw["response"] = error.decoded
+        raw["exception"] = repr(error)
     except Exception as error:  # Keep failures as raw samples.
         row["client_total_ns"] = str(time.perf_counter_ns() - start_ns)
         row["error_stage"] = f"client:{type(error).__name__}"

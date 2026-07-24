@@ -75,8 +75,12 @@ SAMPLES=20 BURST_SAMPLES=30 WARMUP=2 \
 - 四个 CSV：逐样本紧凑字段；
 - 四个 `*-raw.jsonl`：完整 CXLP/2/OpenWhisk 原始响应和 proof；
 - `summary.csv` / `summary.json`：统计结果；
-- `analysis.md`：自动生成的毫秒、微秒和 kernel/client 比例；
+- `analysis.md`：自动生成的 mean/P50/P95/P99/标准差、排他 breakdown
+  和 kernel/client 比例；
 - `environment.txt` / `openwhisk-build-metadata.txt`：提交和工具链；
+- `openwhisk-run.log`：只截取本轮 OpenWhisk 日志，禁止出现逻辑
+  container 的 Docker log 误收集、warm container 失效和 HTTP 429；
+- `postflight-audit.txt`：ghost worker 数、slot `readers=0` 和容器进程表；
 - `dmesg-*.log`、Docker/factory 快照与 `SHA256SUMS`。
 
 所有成功样本都要求同时满足：

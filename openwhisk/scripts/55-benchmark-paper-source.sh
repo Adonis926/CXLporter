@@ -30,6 +30,8 @@ exec > >(tee "$OUTDIR/benchmark.log") 2>&1
 echo "event=begin run_id=$RUN_ID outdir=$OUTDIR"
 INVOKES_CONCURRENT="$INVOKES_CONCURRENT" \
   "$ROOT/scripts/51-start-paper-source.sh"
+OPENWHISK_LOG="$ROOT/paper-source/openwhisk-standalone.log"
+OPENWHISK_LOG_START=$(wc -l <"$OPENWHISK_LOG")
 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   -p 2400 ubuntu@127.0.0.1 \
   "sudo /tmp/cxlfork_capsule_k0 catalog-lookup '$KEY'"
@@ -99,9 +101,16 @@ python3 "$SUMMARIZER" \
   --analysis "$OUTDIR/analysis.md"
 cat "$OUTDIR/analysis.md"
 
+tail -n +$((OPENWHISK_LOG_START + 1)) "$OPENWHISK_LOG" \
+  >"$OUTDIR/openwhisk-run.log"
 grep "creating source-integrated CXLP/2 container" \
-  "$ROOT/paper-source/openwhisk-standalone.log" \
+  "$OUTDIR/openwhisk-run.log" \
   >"$OUTDIR/source-factory-markers.log"
+if grep -E 'docker logs wsk.*paper_cxlfork|collectLogs_error|Failed during use of warm container|http_post.429' \
+  "$OUTDIR/openwhisk-run.log" >"$OUTDIR/openwhisk-run-errors.log"; then
+  echo "OpenWhisk source path emitted a forbidden log/lifecycle/throttle error" >&2
+  exit 1
+fi
 docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' \
   >"$OUTDIR/docker-containers.txt"
 
@@ -114,6 +123,28 @@ for port in 2400 2401; do
     exit 1
   fi
 done
+
+make -C "$PORTER" cxlporter-control cxlporter-paper >/dev/null
+scp -q -o BatchMode=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -P 2401 \
+  "$PORTER/cxlporter-control" ubuntu@127.0.0.1:/tmp/cxlporter-control
+{
+  "$PORTER/cxlporter-paper" client \
+    "$CONTROL_HOST" "$CONTROL_PORT" POOL_STATUS 18446744073709551000
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -p 2401 ubuntu@127.0.0.1 \
+    "chmod +x /tmp/cxlporter-control
+     sudo /tmp/cxlporter-control inspect '$KEY'
+     sudo docker logs --tail 20 cxlfork-ghost-paper
+     sudo docker top cxlfork-ghost-paper -eo pid,ppid,nlwp,stat,comm"
+} >"$OUTDIR/postflight-audit.txt"
+grep -q 'workers=16 verify=ok' "$OUTDIR/postflight-audit.txt"
+grep -q 'readers=0 .* verify=ok' "$OUTDIR/postflight-audit.txt"
+if awk 'NR > 1 && $4 ~ /^Z/ { found=1 } END { exit found ? 0 : 1 }' \
+  "$OUTDIR/postflight-audit.txt"; then
+  echo "postflight found a zombie process" >&2
+  exit 1
+fi
 
 (
   cd "$OUTDIR"

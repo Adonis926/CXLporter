@@ -148,8 +148,8 @@ def write_analysis(records, path):
         "1000 时报告 P99。原始 interval 是嵌套关系，百分比只使用脚本计算的",
         "exclusive 字段，不能把 daemon/agent/fork/kernel 原始区间直接相加。",
         "",
-        "| scenario | n | achieved RPS | client mean (ms) | P50 (ms) | P95 (ms) | P99 (ms) | kernel mean (us) | kernel/client |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| scenario | n | achieved RPS | client mean (ms) | P50 (ms) | P95 (ms) | P99 (ms) | stddev (ms) | kernel mean (us) | kernel/client |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for scenario in scenarios:
         client = indexed.get((scenario, "client_total_ns"))
@@ -166,7 +166,7 @@ def write_analysis(records, path):
         )
         lines.append(
             "| {scenario} | {samples} | {throughput:.2f} | {mean:.3f} | {p50:.3f} | "
-            "{p95:.3f} | {p99} | {kernel:.3f} | {ratio:.3%} |".format(
+            "{p95:.3f} | {p99} | {stddev:.3f} | {kernel:.3f} | {ratio:.3%} |".format(
                 scenario=scenario,
                 samples=client["samples"],
                 throughput=float(throughput["mean"]),
@@ -174,8 +174,45 @@ def write_analysis(records, path):
                 p50=float(client["p50"]) / 1e6,
                 p95=float(client["p95"]) / 1e6,
                 p99=p99,
+                stddev=float(client["stddev"]) / 1e6,
                 kernel=kernel_mean / 1e3,
                 ratio=kernel_mean / client_mean,
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## 排他 mean breakdown",
+            "",
+            "下表全部为逐样本 exclusive 分项的平均值，单位为微秒。每行分项之和",
+            "等于该场景的 `client_total_ns` 平均值；它们可以相加，原始嵌套",
+            "interval 不可以相加。",
+            "",
+            "| scenario | outer control | adapter other | daemon other | Unix connect | Unix transport | catalog | agent other | fork/runtime other | kernel restore | sum (us) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    exclusive_metrics = [
+        "outer_control_ns",
+        "adapter_outside_daemon_ns",
+        "daemon_other_ns",
+        "unix_connect_ns",
+        "unix_transport_ns",
+        "catalog_lookup_ns",
+        "agent_other_ns",
+        "fork_runtime_other_ns",
+        "kernel_restore_ns",
+    ]
+    for scenario in scenarios:
+        values = []
+        for metric in exclusive_metrics:
+            record = indexed.get((scenario, metric))
+            values.append(float(record["mean"]) if record else 0.0)
+        lines.append(
+            "| {scenario} | {values} | {total:.3f} |".format(
+                scenario=scenario,
+                values=" | ".join(f"{value / 1e3:.3f}" for value in values),
+                total=sum(values) / 1e3,
             )
         )
     lines.extend(
