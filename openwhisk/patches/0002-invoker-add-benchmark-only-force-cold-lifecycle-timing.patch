@@ -1,0 +1,163 @@
+From 1d113f65bf78e203dd7d98660dc7c2e99c0a3bdf Mon Sep 17 00:00:00 2001
+From: Adonis <050620@sjtu.edu.cn>
+Date: Mon, 17 Aug 2026 00:36:10 +0800
+Subject: [PATCH] invoker: add benchmark-only force-cold lifecycle timing
+
+---
+ .../core/containerpool/ContainerProxy.scala   | 42 +++++++++++++++----
+ .../test/ContainerProxyTests.scala            | 37 ++++++++++++++++
+ 2 files changed, 71 insertions(+), 8 deletions(-)
+
+diff --git a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerProxy.scala b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerProxy.scala
+index 8261d49d..27ff38f4 100644
+--- a/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerProxy.scala
++++ b/core/invoker/src/main/scala/org/apache/openwhisk/core/containerpool/ContainerProxy.scala
+@@ -301,6 +301,7 @@ class ContainerProxy(factory: (TransactionId,
+     case Event(job: Run, _) =>
+       implicit val transid = job.msg.transid
+       activeCount += 1
++      val containerCreateStarted = System.nanoTime()
+       // create a new container
+       val container = factory(
+         job.msg.transid,
+@@ -348,7 +349,7 @@ class ContainerProxy(factory: (TransactionId,
+         }
+         .flatMap { container =>
+           // now attempt to inject the user code and run the action
+-          initializeAndRun(container, job)
++          initializeAndRun(container, job, benchContainerCreateNs = Some(System.nanoTime() - containerCreateStarted))
+             .map(_ => RunCompleted)
+         }
+         .pipeTo(self)
+@@ -421,8 +422,17 @@ class ContainerProxy(factory: (TransactionId,
+     case Event(RunCompleted, data: WarmedData) =>
+       activeCount -= 1
+       val newData = data.withoutResumeRun()
+-      //if there are items in runbuffer, process them if there is capacity, and stay; otherwise if we have any pending activations, also stay
+-      if (requestWork(data) || activeCount > 0) {
++      if (data.action.annotations.isTruthy("bench-force-cold")) {
++        logging.info(this, s"bench-force-cold removing container ${data.container} after activation")
++        rejectBuffered()
++        if (activeCount == 0) {
++          destroyContainer(newData, true)
++        } else {
++          rescheduleJob = true
++          goto(Removing) using newData
++        }
++      } else if (requestWork(data) || activeCount > 0) {
++        // If there are buffered or active requests, keep the reusable path.
+         stay using newData
+       } else {
+         goto(Ready) using newData
+@@ -773,8 +783,11 @@ class ContainerProxy(factory: (TransactionId,
+    * @return a future completing after logs have been collected and
+    *         added to the WhiskActivation
+    */
+-  def initializeAndRun(container: Container, job: Run, reschedule: Boolean = false)(
+-    implicit tid: TransactionId): Future[WhiskActivation] = {
++  def initializeAndRun(
++    container: Container,
++    job: Run,
++    reschedule: Boolean = false,
++    benchContainerCreateNs: Option[Long] = None)(implicit tid: TransactionId): Future[WhiskActivation] = {
+     val actionTimeout = job.action.limits.timeout.duration
+     val unlockedArgs =
+       ContainerProxy.unlockArguments(job.msg.content, job.msg.lockedArgs, ParameterEncryption.singleton)
+@@ -846,7 +859,9 @@ class ContainerProxy(factory: (TransactionId,
+                 initInterval,
+                 initRunInterval,
+                 runInterval.duration >= actionTimeout,
+-                response)
++                response,
++                benchContainerCreateNs,
++                Some(runInterval.duration.toNanos))
+           }
+       }
+       .recoverWith {
+@@ -1043,7 +1058,9 @@ object ContainerProxy {
+                                initInterval: Option[Interval],
+                                totalInterval: Interval,
+                                isTimeout: Boolean,
+-                               response: ActivationResponse) = {
++                               response: ActivationResponse,
++                               benchContainerCreateNs: Option[Long] = None,
++                               benchRunNs: Option[Long] = None) = {
+     val causedBy = if (job.msg.causedBySequence) {
+       Some(Parameters(WhiskActivation.causedByAnnotation, JsString(Exec.SEQUENCE)))
+     } else None
+@@ -1057,6 +1074,14 @@ object ContainerProxy {
+       initInterval.map(initTime => Parameters(WhiskActivation.initTimeAnnotation, initTime.duration.toMillis.toJson))
+     }
+ 
++    val benchCreate =
++      benchContainerCreateNs.map(value => Parameters("benchContainerCreateNs", JsString(value.toString)))
++    val benchInit = initInterval.map(value => Parameters("benchInitNs", JsString(value.duration.toNanos.toString)))
++    val benchRun = benchRunNs.map(value => Parameters("benchRunNs", JsString(value.toString)))
++    val benchCold = if (job.action.annotations.isTruthy("bench-force-cold")) {
++      Some(Parameters("benchForceCold", JsBoolean(true)))
++    } else None
++
+     val binding =
+       job.msg.action.binding.map(f => Parameters(WhiskActivation.bindingAnnotation, JsString(f.asString)))
+ 
+@@ -1076,7 +1101,8 @@ object ContainerProxy {
+           Parameters(WhiskActivation.pathAnnotation, JsString(job.action.fullyQualifiedName(false).asString)) ++
+           Parameters(WhiskActivation.kindAnnotation, JsString(job.action.exec.kind)) ++
+           Parameters(WhiskActivation.timeoutAnnotation, JsBoolean(isTimeout)) ++
+-          causedBy ++ initTime ++ waitTime ++ binding
++          causedBy ++ initTime ++ waitTime ++ binding ++
++          benchCreate ++ benchInit ++ benchRun ++ benchCold
+       })
+   }
+ 
+diff --git a/tests/src/test/scala/org/apache/openwhisk/core/containerpool/test/ContainerProxyTests.scala b/tests/src/test/scala/org/apache/openwhisk/core/containerpool/test/ContainerProxyTests.scala
+index f8f856e4..d16d8128 100644
+--- a/tests/src/test/scala/org/apache/openwhisk/core/containerpool/test/ContainerProxyTests.scala
++++ b/tests/src/test/scala/org/apache/openwhisk/core/containerpool/test/ContainerProxyTests.scala
+@@ -545,6 +545,43 @@ class ContainerProxyTests
+     }
+   }
+ 
++  it should "destroy a container after an action annotated bench-force-cold" in within(timeout) {
++    val coldAction = action.copy(annotations = Parameters("bench-force-cold", JsBoolean(true)))
++    val container = new TestContainer
++    val factory = createFactory(Future.successful(container))
++    val acker = createAcker(coldAction)
++    val store = createStore
++    val collector = createCollector()
++    val machine = childActorOf(
++      ContainerProxy.props(
++        factory,
++        acker,
++        store,
++        collector,
++        InvokerInstanceId(0, userMemory = defaultUserMemory),
++        poolConfig,
++        healthchecksConfig(),
++        pauseGrace = pauseGrace))
++
++    registerCallback(machine)
++    machine ! Run(coldAction, message)
++    expectMsg(Transition(machine, Uninitialized, Running))
++    expectMsg(ContainerRemoved(true))
++    expectMsg(Transition(machine, Running, Removing))
++
++    awaitAssert {
++      container.initializeCount shouldBe 1
++      container.runCount shouldBe 1
++      container.destroyCount shouldBe 1
++      acker.calls should have size 1
++      acker.calls.head._2.annotations.get("benchForceCold") shouldBe Some(JsBoolean(true))
++      acker.calls.head._2.annotations.get("benchContainerCreateNs") should not be empty
++      acker.calls.head._2.annotations.get("benchInitNs") should not be empty
++      acker.calls.head._2.annotations.get("benchRunNs") should not be empty
++      store.calls should have size 1
++    }
++  }
++
+   it should "not collect logs if the log-limit is set to 0" in within(timeout) {
+     val noLogsAction = action.copy(limits = ActionLimits(logs = LogLimit(0.MB)))
+ 
+-- 
+2.43.0
+
