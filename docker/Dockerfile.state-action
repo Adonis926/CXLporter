@@ -1,0 +1,5 @@
+FROM scratch
+
+COPY state-action-http /state-action-http
+
+ENTRYPOINT ["/state-action-http"]

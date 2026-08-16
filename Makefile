@@ -11,7 +11,7 @@ UAPI_BUILD_DIR := .build-uapi/include
 CFLAGS += -I$(UAPI_BUILD_DIR)
 
 BIN := cxlporter cxlporter-control cxlporter-paper cxlfork-ghost-agent \
-	cxlfork-capsule-runtime
+	cxlfork-capsule-runtime state-action-http state-action-capsule
 
 .PHONY: all control clean
 
@@ -36,6 +36,18 @@ cxlfork-capsule-runtime: $(CXLFORK_K0_SOURCE) \
 		$(UAPI_BUILD_DIR)/linux/cxlfork.h
 	$(CC) $(CFLAGS) -Werror -static -no-pie -fno-pie \
 		-fno-stack-protector -fcf-protection=none -pthread -o $@ $<
+
+state-action-http: workload/state_action_http.c workload/state_action_core.c \
+		workload/state_action_core.h
+	$(CC) $(CFLAGS) -Werror -static -pthread -Iworkload \
+		-o $@ workload/state_action_http.c workload/state_action_core.c
+
+state-action-capsule: workload/state_action_capsule.c \
+		workload/state_action_core.c workload/state_action_core.h \
+		$(UAPI_BUILD_DIR)/linux/cxlfork.h
+	$(CC) $(CFLAGS) -Werror -static -no-pie -fno-pie \
+		-fno-stack-protector -fcf-protection=none -pthread -Iworkload \
+		-o $@ workload/state_action_capsule.c workload/state_action_core.c
 
 $(UAPI_BUILD_DIR)/linux/cxlfork.h: $(CXLFORK_UAPI_HEADER)
 	mkdir -p $(dir $@)

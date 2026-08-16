@@ -3,6 +3,8 @@ cxlporter-control
 cxlporter-paper
 cxlfork-ghost-agent
 cxlfork-capsule-runtime
+state-action-http
+state-action-capsule
 .build-uapi/
 results/*.csv
 results/control-*/

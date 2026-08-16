@@ -1,0 +1,6 @@
+FROM scratch
+
+COPY cxlfork-ghost-agent /opt/cxlfork/cxlfork-ghost-agent
+COPY state-action-capsule /opt/cxlfork/state-action-capsule
+
+ENTRYPOINT ["/opt/cxlfork/cxlfork-ghost-agent", "--runtime", "/opt/cxlfork/state-action-capsule"]

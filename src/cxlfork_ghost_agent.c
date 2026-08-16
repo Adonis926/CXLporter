@@ -106,6 +106,34 @@ static uint64_t parse_v4_metric(const char *output, const char *name)
 	return strtoull(field, &end, 10);
 }
 
+static uint64_t parse_hex_metric(const char *output, const char *name)
+{
+	const char *field = strstr(output, name);
+	char *end;
+
+	if (!field)
+		return 0;
+	field += strlen(name);
+	errno = 0;
+	return strtoull(field, &end, 16);
+}
+
+static uint64_t parse_runtime_metric(const char *output, const char *name)
+{
+	const char *continued = strstr(output, "event=target-continued");
+	const char *field;
+	char *end;
+
+	if (!continued)
+		return 0;
+	field = strstr(continued, name);
+	if (!field)
+		return 0;
+	field += strlen(name);
+	errno = 0;
+	return strtoull(field, &end, 10);
+}
+
 static int run_capsule(const struct cxlfork_catalog_record_v4 *record,
 		       struct cxlporter_ghost_response *response)
 {
@@ -179,6 +207,20 @@ static int run_capsule(const struct cxlfork_catalog_record_v4 *record,
 		parse_v4_metric(response->output, "total_ns=");
 	response->restore_id =
 		parse_v4_metric(response->output, "restore_id=");
+	response->workload_ns =
+		parse_runtime_metric(response->output, "workload_ns=");
+	response->state_bytes =
+		parse_runtime_metric(response->output, "state_bytes=");
+	response->state_checksum =
+		parse_hex_metric(response->output, "state_checksum=");
+	response->worker_pid =
+		parse_runtime_metric(response->output, "target_pid=");
+	response->worker_cpu =
+		parse_runtime_metric(response->output, "worker_cpu=");
+	response->source_initializations =
+		parse_runtime_metric(response->output, "source_inits=");
+	response->invocation =
+		parse_runtime_metric(response->output, "invocation=");
 	response->verify = response->child_status == 0 &&
 		strstr(response->output, "event=shared-leaf-proof") &&
 		strstr(response->output, "event=target-continued") &&

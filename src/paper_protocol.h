@@ -49,6 +49,13 @@ struct cxlporter_ghost_response {
 	uint64_t catalog_lookup_ns;
 	uint64_t fork_to_exit_ns;
 	uint64_t kernel_restore_ns;
+	uint64_t workload_ns;
+	uint64_t state_bytes;
+	uint64_t state_checksum;
+	uint64_t worker_pid;
+	uint64_t worker_cpu;
+	uint64_t source_initializations;
+	uint64_t invocation;
 	uint64_t agent_total_ns;
 	char output[CXLPORTER_OUTPUT_LEN];
 };

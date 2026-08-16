@@ -247,6 +247,13 @@ static void handle_client(int client, const char *socket_path)
 		" catalog_lookup_ns=%" PRIu64
 		" fork_to_exit_ns=%" PRIu64
 		" kernel_restore_ns=%" PRIu64
+		" workload_ns=%" PRIu64
+		" state_bytes=%" PRIu64
+		" state_checksum=%016" PRIx64
+		" worker_pid=%" PRIu64
+		" worker_cpu=%" PRIu64
+		" source_initializations=%" PRIu64
+		" invocation=%" PRIu64
 		" agent_total_ns=%" PRIu64
 		" daemon_total_ns=%" PRIu64
 		" output_hex=%s\n",
@@ -258,6 +265,10 @@ static void handle_client(int client, const char *socket_path)
 		daemon_receive_ns, connect_ns, roundtrip_ns,
 		daemon_to_agent_ns, response.catalog_lookup_ns,
 		response.fork_to_exit_ns, response.kernel_restore_ns,
+		response.workload_ns, response.state_bytes,
+		response.state_checksum, response.worker_pid,
+		response.worker_cpu, response.source_initializations,
+		response.invocation,
 		response.agent_total_ns, daemon_total_ns, output_hex);
 }
 
