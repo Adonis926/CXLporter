@@ -137,22 +137,40 @@ def normal_mechanism_valid(args, row, result, annotations):
         and integer(row["worker_cpu"], -1) in args.target_cpu_set
     )
     if args.mode == "standard-cold":
-        return common and annotations.get("benchForceCold") is True and row["init_ns"] != "NA"
+        return (
+            common
+            and integer(row["invocation"]) == 1
+            and annotations.get("benchForceCold") is True
+            and row["container_create_ns"] != "NA"
+            and row["init_ns"] != "NA"
+        )
     if args.mode == "standard-warm":
-        return common and row["container_create_ns"] == "NA" and row["init_ns"] == "NA"
+        return (
+            common
+            and integer(row["invocation"], 0) >= 2
+            and row["container_create_ns"] == "NA"
+            and row["init_ns"] == "NA"
+        )
     return False
 
 
 def cxl_mechanism_valid(args, row, result):
+    proof = result.get("runtime_proof", "")
     return (
         result.get("verify") in ("1", 1, True)
+        and result.get("openwhisk_source_integrated") is True
         and row["state_checksum"] == EXPECTED_CHECKSUM
         and integer(row["state_bytes"]) == EXPECTED_STATE_BYTES
         and integer(row["init_count"]) == 1
         and integer(row["invocation"]) == 1
         and integer(row["restore_id"], 0) > 0
+        and integer(row["slot_generation"], 0) > 0
+        and integer(row["catalog_generation"], 0) > 0
         and integer(row["worker_pid"], 0) > 0
         and integer(row["worker_cpu"], -1) in args.target_cpu_set
+        and "event=shared-leaf-proof" in proof
+        and "event=target-continued" in proof
+        and "markers=ok verify=ok" in proof
     )
 
 
@@ -213,6 +231,8 @@ def one_sample(args, index):
         raw["activation"] = activation
         if status != 200 or not isinstance(activation, dict):
             raise RuntimeError(f"OpenWhisk HTTP status={status}")
+        if activation.get("response", {}).get("success") is not True:
+            raise RuntimeError("OpenWhisk activation response is not successful")
         row["activation_id"] = text(activation.get("activationId"))
         annotations = annotations_map(activation)
         wait_ms = integer(annotations.get("waitTime"), 0)
