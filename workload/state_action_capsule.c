@@ -275,7 +275,14 @@ static int map_fixed(void *address, size_t bytes)
 
 	if (mapping == MAP_FAILED)
 		return -1;
-	madvise(mapping, bytes, MADV_NOHUGEPAGE);
+	if (madvise(mapping, bytes, MADV_NOHUGEPAGE)) {
+		munmap(mapping, bytes);
+		return -1;
+	}
+	/* The restricted checkpoint requires private anonymous pages.  Merely
+	 * mapping the arena leaves untouched holes backed by the shared zero page;
+	 * populate every page before the cooperative continuation is sealed. */
+	memset(mapping, 0, bytes);
 	return 0;
 }
 
