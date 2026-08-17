@@ -557,6 +557,43 @@ static int catalog_lookup(uint64_t expected_key)
 	return 0;
 }
 
+static int catalog_evict(uint64_t expected_key)
+{
+	struct cxlfork_catalog_lookup_v4 lookup = {
+		.size = sizeof(lookup),
+		.abi_version = CXLFORK_ABI_VERSION_V4,
+	};
+	struct cxlfork_catalog_evict_v4 op = {
+		.size = sizeof(op),
+		.abi_version = CXLFORK_ABI_VERSION_V4,
+	};
+	int fd = open_device();
+
+	catalog_identity(&lookup.record);
+	if (fd < 0 || ioctl(fd, CXLFORK_CATALOG_LOOKUP_V4, &lookup) ||
+	    lookup.record.key != expected_key ||
+	    !(lookup.record.flags & CXLFORK_CATALOG_RECORD_F_READY)) {
+		if (fd >= 0)
+			close(fd);
+		return 1;
+	}
+	memcpy(op.owner, lookup.record.owner, sizeof(op.owner));
+	memcpy(op.function, lookup.record.function, sizeof(op.function));
+	memcpy(op.version, lookup.record.version, sizeof(op.version));
+	op.catalog_generation = lookup.record.catalog_generation;
+	if (ioctl(fd, CXLFORK_CATALOG_EVICT_V4, &op)) {
+		perror("CATALOG_EVICT_V4");
+		close(fd);
+		return 1;
+	}
+	dprintf(STDOUT_FILENO,
+		"state-action event=catalog-evict key=%" PRIu64
+		" catalog_generation=%" PRIu64 " verify=ok\n",
+		expected_key, (uint64_t)lookup.record.catalog_generation);
+	close(fd);
+	return 0;
+}
+
 static int release_capsule(uint64_t key)
 {
 	struct cxlfork_inspect_capsule_v4 inspect = {
@@ -602,7 +639,7 @@ int main(int argc, char **argv)
 
 	if (argc != 3 || parse_key(argv[2], &key)) {
 		fprintf(stderr,
-			"usage: %s prepare|restore|release|catalog-register|catalog-lookup KEY\n",
+			"usage: %s prepare|restore|release|catalog-register|catalog-lookup|catalog-evict KEY\n",
 			argv[0]);
 		return 2;
 	}
@@ -616,5 +653,7 @@ int main(int argc, char **argv)
 		return catalog_register(key);
 	if (!strcmp(argv[1], "catalog-lookup"))
 		return catalog_lookup(key);
+	if (!strcmp(argv[1], "catalog-evict"))
+		return catalog_evict(key);
 	return 2;
 }
