@@ -29,7 +29,8 @@ FIELDS = [
     "catalog_generation", "restore_id", "openwhisk_adapter_total_ns",
     "daemon_total_ns", "unix_connect_ns", "unix_roundtrip_ns",
     "daemon_to_agent_ns", "catalog_lookup_ns", "agent_total_ns",
-    "fork_to_exit_ns", "kernel_restore_ns", "api_queue_schedule_ns",
+    "fork_to_exit_ns", "kernel_restore_ns", "ghost_create_ns",
+    "ghost_teardown_ns", "ghost_instance_id", "api_queue_schedule_ns",
     "handoff_ns", "worker_provision_ns", "state_activation_ns",
     "common_workload_ns", "completion_response_ns", "exclusive_sum_ns",
     "exclusive_delta_ns", "exclusive_valid", "mechanism_valid",
@@ -40,7 +41,8 @@ CXL_FIELDS = [
     "restore_id", "openwhisk_adapter_total_ns", "daemon_total_ns",
     "unix_connect_ns", "unix_roundtrip_ns", "daemon_to_agent_ns",
     "catalog_lookup_ns", "agent_total_ns", "fork_to_exit_ns",
-    "kernel_restore_ns",
+    "kernel_restore_ns", "ghost_create_ns", "ghost_teardown_ns",
+    "ghost_instance_id",
 ]
 
 
@@ -156,7 +158,7 @@ def normal_mechanism_valid(args, row, result, annotations):
 
 def cxl_mechanism_valid(args, row, result):
     proof = result.get("runtime_proof", "")
-    return (
+    common = (
         result.get("verify") in ("1", 1, True)
         and result.get("openwhisk_source_integrated") is True
         and row["state_checksum"] == EXPECTED_CHECKSUM
@@ -172,6 +174,14 @@ def cxl_mechanism_valid(args, row, result):
         and "event=target-continued" in proof
         and "markers=ok verify=ok" in proof
     )
+    if args.mode == "cxlfork-cold":
+        return (
+            common
+            and integer(row["ghost_create_ns"], 0) > 0
+            and integer(row["ghost_teardown_ns"], 0) > 0
+            and row["ghost_instance_id"] not in ("", "NA", "persistent")
+        )
+    return common
 
 
 def derive_breakdown(args, row):
@@ -198,8 +208,10 @@ def derive_breakdown(args, row):
         if None in (adapter, fork_total, kernel):
             return
         api = wait_ns
-        handoff = adapter - fork_total
-        provision = fork_total - kernel - workload
+        ghost_create = integer(row["ghost_create_ns"], 0)
+        ghost_teardown = integer(row["ghost_teardown_ns"], 0)
+        handoff = adapter - fork_total - ghost_create - ghost_teardown
+        provision = ghost_create + fork_total - kernel - workload
         state_activation = kernel
 
     partial = api + handoff + provision + state_activation + workload
@@ -321,10 +333,14 @@ def validate_set(args, rows):
         containers = {row["container_id"] for row in successes}
         if "NA" in containers or len(containers) != 1:
             return False, "standard warm samples did not reuse one container"
-    if args.mode == "cxlfork":
+    if args.mode in ("cxlfork", "cxlfork-cold"):
         restore_ids = [row["restore_id"] for row in successes]
         if "NA" in restore_ids or len(restore_ids) != len(set(restore_ids)):
             return False, "CXLfork restore IDs are not unique"
+    if args.mode == "cxlfork-cold":
+        instances = [row["ghost_instance_id"] for row in successes]
+        if "NA" in instances or len(instances) != len(set(instances)):
+            return False, "CXLfork cold ghost instance IDs are not unique"
     return True, "ok"
 
 
@@ -477,7 +493,11 @@ def summarize_main(arguments):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("standard-cold", "standard-warm", "cxlfork"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=("standard-cold", "standard-warm", "cxlfork", "cxlfork-cold"),
+        required=True,
+    )
     parser.add_argument("--scenario", choices=("sequential", "throughput"), required=True)
     parser.add_argument("--system", required=True)
     parser.add_argument("--vcpus", type=int, required=True)

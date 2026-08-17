@@ -3,7 +3,9 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -11,7 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -23,7 +27,18 @@
 #define DEFAULT_LISTEN_ADDRESS "0.0.0.0"
 #define DEFAULT_LISTEN_PORT "7100"
 #define DEFAULT_HOST_GHOST_SOCKET "/run/cxlfork-paper/ghost.sock"
+#define DEFAULT_COLD_ROOT "/run/cxlfork-cold"
+#define DEFAULT_COLD_IMAGE "cxlfork-ghost:state-action-v1"
+#define DEFAULT_COLD_CPUSET "0"
 #define MAX_LINE 32768
+
+struct daemon_config {
+	const char *socket_path;
+	bool cold_ghost;
+	const char *cold_root;
+	const char *cold_image;
+	const char *cold_cpuset;
+};
 
 static uint64_t nsec_now(void)
 {
@@ -71,6 +86,123 @@ static int read_line(int fd, char *line, size_t capacity)
 	}
 	errno = EMSGSIZE;
 	return -1;
+}
+
+static bool environment_enabled(const char *name)
+{
+	const char *value = getenv(name);
+
+	return value && (!strcmp(value, "1") || !strcasecmp(value, "true") ||
+		       !strcasecmp(value, "yes"));
+}
+
+static int run_quiet_command(char *const arguments[])
+{
+	int status;
+	pid_t child = fork();
+
+	if (child < 0)
+		return -errno;
+	if (!child) {
+		int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null_fd >= 0) {
+			dup2(null_fd, STDOUT_FILENO);
+			dup2(null_fd, STDERR_FILENO);
+			close(null_fd);
+		}
+		execvp(arguments[0], arguments);
+		_exit(127);
+	}
+	while (waitpid(child, &status, 0) < 0) {
+		if (errno != EINTR)
+			return -errno;
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status))
+		return -EIO;
+	return 0;
+}
+
+static void remove_cold_directory(const char *directory,
+				  const char *socket_path)
+{
+	unlink(socket_path);
+	rmdir(directory);
+}
+
+static int create_cold_ghost(const struct daemon_config *config,
+			     uint64_t request_id, char *instance,
+			     size_t instance_capacity, char *directory,
+			     size_t directory_capacity, char *socket_path,
+			     size_t socket_capacity, uint64_t *create_ns)
+{
+	char mount_spec[PATH_MAX + 32];
+	char workers[] = "CXLPORTER_GHOST_WORKERS=1";
+	char *arguments[] = {
+		"docker", "run", "-d", "--name", instance,
+		"--network", "none", "--cpuset-cpus",
+		(char *)config->cold_cpuset,
+		"--device", "/dev/cxlfork:/dev/cxlfork",
+		"-e", workers, "-v", mount_spec,
+		(char *)config->cold_image, NULL,
+	};
+	char *cleanup_arguments[] = {
+		"docker", "rm", "-f", instance, NULL,
+	};
+	struct stat metadata;
+	struct timespec pause = {
+		.tv_nsec = 1000000,
+	};
+	uint64_t start = nsec_now();
+	int index;
+	int status;
+
+	if (snprintf(instance, instance_capacity, "cxlfork-cold-%ld-%016" PRIx64,
+		     (long)getpid(), request_id) >= (int)instance_capacity ||
+	    snprintf(directory, directory_capacity, "%s/%ld-%016" PRIx64,
+		     config->cold_root, (long)getpid(), request_id) >=
+		     (int)directory_capacity ||
+	    snprintf(socket_path, socket_capacity, "%s/ghost.sock", directory) >=
+		     (int)socket_capacity ||
+	    snprintf(mount_spec, sizeof(mount_spec), "%s:/run/cxlfork",
+		     directory) >= (int)sizeof(mount_spec))
+		return -ENAMETOOLONG;
+	if (mkdir(config->cold_root, 0777) && errno != EEXIST)
+		return -errno;
+	chmod(config->cold_root, 0777);
+	if (mkdir(directory, 0777))
+		return -errno;
+	chmod(directory, 0777);
+	status = run_quiet_command(arguments);
+	if (status) {
+		run_quiet_command(cleanup_arguments);
+		remove_cold_directory(directory, socket_path);
+		return status;
+	}
+	for (index = 0; index < 60000; index++) {
+		if (!stat(socket_path, &metadata) && S_ISSOCK(metadata.st_mode)) {
+			*create_ns = nsec_now() - start;
+			return 0;
+		}
+		nanosleep(&pause, NULL);
+	}
+	run_quiet_command(cleanup_arguments);
+	remove_cold_directory(directory, socket_path);
+	return -ETIMEDOUT;
+}
+
+static int destroy_cold_ghost(const char *instance, const char *directory,
+			      const char *socket_path, uint64_t *teardown_ns)
+{
+	char *arguments[] = {
+		"docker", "rm", "-f", (char *)instance, NULL,
+	};
+	uint64_t start = nsec_now();
+	int status = run_quiet_command(arguments);
+
+	remove_cold_directory(directory, socket_path);
+	*teardown_ns = nsec_now() - start;
+	return status;
 }
 
 static int parse_u64(const char *text, uint64_t *value)
@@ -196,17 +328,24 @@ static void hex_encode(const char *input, size_t length,
 	output[length * 2] = '\0';
 }
 
-static void handle_client(int client, const char *socket_path)
+static void handle_client(int client, const struct daemon_config *config)
 {
 	struct cxlporter_ghost_request request;
 	struct cxlporter_ghost_response response;
 	char line[1024];
 	char output_hex[CXLPORTER_OUTPUT_LEN * 2 + 1];
+	char cold_instance[128] = "persistent";
+	char cold_directory[PATH_MAX] = "";
+	char cold_socket[PATH_MAX] = "";
+	const char *socket_path = config->socket_path;
 	uint64_t daemon_receive_ns;
 	uint64_t connect_ns = 0;
 	uint64_t roundtrip_ns = 0;
 	uint64_t daemon_total_ns;
 	uint64_t daemon_to_agent_ns = 0;
+	uint64_t ghost_create_ns = 0;
+	uint64_t ghost_teardown_ns = 0;
+	bool cold_created = false;
 	int status;
 
 	daemon_receive_ns = nsec_now();
@@ -219,14 +358,40 @@ static void handle_client(int client, const char *socket_path)
 		return;
 	}
 	memset(&response, 0, sizeof(response));
-	status = ghost_roundtrip(socket_path, &request, &response,
-				 &connect_ns, &roundtrip_ns);
+	if (config->cold_ghost && request.op == CXLPORTER_GHOST_ACTIVATE) {
+		status = create_cold_ghost(config, request.request_id,
+					   cold_instance, sizeof(cold_instance),
+					   cold_directory, sizeof(cold_directory),
+					   cold_socket, sizeof(cold_socket),
+					   &ghost_create_ns);
+		if (!status) {
+			cold_created = true;
+			socket_path = cold_socket;
+		}
+	} else {
+		status = 0;
+	}
+	if (!status)
+		status = ghost_roundtrip(socket_path, &request, &response,
+					 &connect_ns, &roundtrip_ns);
+	if (cold_created) {
+		int cleanup_status = destroy_cold_ghost(cold_instance,
+							cold_directory, cold_socket,
+							&ghost_teardown_ns);
+
+		if (!status && cleanup_status)
+			status = cleanup_status;
+	}
 	daemon_total_ns = nsec_now() - daemon_receive_ns;
 	if (status) {
 		dprintf(client,
 			"CXLP/2 ERROR request_id=%" PRIu64
-			" status=%d daemon_total_ns=%" PRIu64 "\n",
-			request.request_id, status, daemon_total_ns);
+			" status=%d daemon_total_ns=%" PRIu64
+			" ghost_create_ns=%" PRIu64
+			" ghost_teardown_ns=%" PRIu64
+			" ghost_instance_id=%s\n",
+			request.request_id, status, daemon_total_ns,
+			ghost_create_ns, ghost_teardown_ns, cold_instance);
 		return;
 	}
 	if (response.agent_receive_ns >= daemon_receive_ns)
@@ -256,6 +421,9 @@ static void handle_client(int client, const char *socket_path)
 		" invocation=%" PRIu64
 		" agent_total_ns=%" PRIu64
 		" daemon_total_ns=%" PRIu64
+		" ghost_create_ns=%" PRIu64
+		" ghost_teardown_ns=%" PRIu64
+		" ghost_instance_id=%s"
 		" output_hex=%s\n",
 		response.status ? "ERROR" : "OK",
 		response.request_id, response.status,
@@ -269,7 +437,8 @@ static void handle_client(int client, const char *socket_path)
 		response.state_checksum, response.worker_pid,
 		response.worker_cpu, response.source_initializations,
 		response.invocation,
-		response.agent_total_ns, daemon_total_ns, output_hex);
+		response.agent_total_ns, daemon_total_ns,
+		ghost_create_ns, ghost_teardown_ns, cold_instance, output_hex);
 }
 
 static int listen_tcp(const char *address_text, const char *port)
@@ -310,7 +479,7 @@ static int listen_tcp(const char *address_text, const char *port)
 }
 
 static int run_daemon(const char *address, const char *port,
-		      const char *socket_path)
+		      const struct daemon_config *config)
 {
 	int server;
 
@@ -322,8 +491,10 @@ static int run_daemon(const char *address, const char *port,
 		return 1;
 	}
 	printf("cxlporter-paper event=ready protocol=CXLP/2 listen=%s:%s"
-	       " ghost_socket=%s device_access=none verify=ok\n",
-	       address, port, socket_path);
+	       " ghost_socket=%s cold_ghost=%u cold_image=%s"
+	       " device_access=none verify=ok\n",
+	       address, port, config->socket_path, config->cold_ghost,
+	       config->cold_ghost ? config->cold_image : "NA");
 	fflush(stdout);
 	for (;;) {
 		int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
@@ -342,7 +513,8 @@ static int run_daemon(const char *address, const char *port,
 		}
 		if (!child) {
 			close(server);
-			handle_client(client, socket_path);
+			signal(SIGCHLD, SIG_DFL);
+			handle_client(client, config);
 			close(client);
 			_exit(0);
 		}
@@ -428,14 +600,27 @@ static int run_client(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	if (argc >= 2 && !strcmp(argv[1], "daemon")) {
+		struct daemon_config config = {
+			.cold_ghost = environment_enabled("CXLPORTER_COLD_GHOST"),
+			.cold_root = getenv("CXLPORTER_COLD_ROOT"),
+			.cold_image = getenv("CXLPORTER_COLD_IMAGE"),
+			.cold_cpuset = getenv("CXLPORTER_COLD_CPUSET"),
+		};
 		const char *address = argc > 2 ? argv[2] : DEFAULT_LISTEN_ADDRESS;
 		const char *port = argc > 3 ? argv[3] : DEFAULT_LISTEN_PORT;
-		const char *socket_path =
+
+		config.socket_path =
 			argc > 4 ? argv[4] : DEFAULT_HOST_GHOST_SOCKET;
+		if (!config.cold_root)
+			config.cold_root = DEFAULT_COLD_ROOT;
+		if (!config.cold_image)
+			config.cold_image = DEFAULT_COLD_IMAGE;
+		if (!config.cold_cpuset)
+			config.cold_cpuset = DEFAULT_COLD_CPUSET;
 
 		if (argc > 5)
 			goto usage;
-		return run_daemon(address, port, socket_path);
+		return run_daemon(address, port, &config);
 	}
 	if (argc >= 2 && !strcmp(argv[1], "client")) {
 		int result = run_client(argc, argv);
